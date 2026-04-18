@@ -1,0 +1,5 @@
+# Local Supabase CLI / deploy metadata. Set project_id when linking: `supabase link`.
+project_id = "sardine-app"
+
+[functions.generate-score]
+verify_jwt = true

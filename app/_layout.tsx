@@ -1,24 +1,30 @@
+import 'react-native-gesture-handler';
+import '@/src/lib/backgroundScoreTask';
+
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { useFonts } from 'expo-font';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { AppState, StyleSheet, View } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 
 import { useColorScheme } from '@/components/useColorScheme';
+import { registerBackgroundScoreFetch } from '@/src/lib/backgroundScoreTask';
+import { getAppLockEnabled, runInitialAppLockGate } from '@/src/lib/appLock';
+import { initRevenueCat } from '@/src/lib/revenueCat';
+import { supabase } from '@/src/lib/supabase';
+import { useAppStore } from '@/src/store';
+import { colors } from '@/src/styles/theme';
 
-export {
-  // Catch any errors thrown by the Layout component.
-  ErrorBoundary,
-} from 'expo-router';
+export { ErrorBoundary } from 'expo-router';
 
 export const unstable_settings = {
-  // Ensure that reloading on `/modal` keeps a back button present.
   initialRouteName: '(tabs)',
 };
 
-// Prevent the splash screen from auto-hiding before asset loading is complete.
 SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
@@ -27,33 +33,126 @@ export default function RootLayout() {
     ...FontAwesome.font,
   });
 
-  // Expo Router uses Error Boundaries to catch errors in the navigation tree.
+  const [appLockGateReady, setAppLockGateReady] = useState(() => !getAppLockEnabled());
+  const [resumeBiometricBlocking, setResumeBiometricBlocking] = useState(false);
+  const appStateRef = useRef(AppState.currentState);
+  /** Suppresses a duplicate Face ID / fingerprint prompt right after cold-start unlock. */
+  const resumeLockBypassUntilRef = useRef(0);
+
   useEffect(() => {
     if (error) throw error;
   }, [error]);
 
   useEffect(() => {
-    if (loaded) {
+    if (appLockGateReady) return;
+    let cancelled = false;
+    void runInitialAppLockGate().finally(() => {
+      if (!cancelled) setAppLockGateReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [appLockGateReady]);
+
+  useEffect(() => {
+    initRevenueCat();
+  }, []);
+
+  useEffect(() => {
+    const { setSession, setAuthHydrated } = useAppStore.getState();
+
+    void supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setAuthHydrated(true);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (loaded && appLockGateReady) {
       SplashScreen.hideAsync();
     }
-  }, [loaded]);
+  }, [loaded, appLockGateReady]);
 
-  if (!loaded) {
+  useEffect(() => {
+    if (!appLockGateReady) return;
+    resumeLockBypassUntilRef.current = Date.now() + 800;
+  }, [appLockGateReady]);
+
+  useEffect(() => {
+    if (!loaded || !appLockGateReady) return;
+    void registerBackgroundScoreFetch().catch(() => {});
+  }, [loaded, appLockGateReady]);
+
+  useEffect(() => {
+    if (!loaded || !appLockGateReady) return;
+
+    appStateRef.current = AppState.currentState;
+
+    const sub = AppState.addEventListener('change', (nextState) => {
+      const prevState = appStateRef.current;
+
+      if (
+        getAppLockEnabled() &&
+        nextState === 'active' &&
+        prevState !== 'active' &&
+        Date.now() >= resumeLockBypassUntilRef.current
+      ) {
+        setResumeBiometricBlocking(true);
+        void runInitialAppLockGate().finally(() => {
+          setResumeBiometricBlocking(false);
+        });
+      }
+
+      appStateRef.current = nextState;
+    });
+
+    return () => sub.remove();
+  }, [loaded, appLockGateReady]);
+
+  if (!loaded || !appLockGateReady) {
     return null;
   }
 
-  return <RootLayoutNav />;
+  return <RootLayoutNav resumeBiometricBlocking={resumeBiometricBlocking} />;
 }
 
-function RootLayoutNav() {
+function RootLayoutNav({ resumeBiometricBlocking }: { resumeBiometricBlocking: boolean }) {
   const colorScheme = useColorScheme();
 
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
-      </Stack>
-    </ThemeProvider>
+    <GestureHandlerRootView style={styles.navRoot}>
+      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+        <View style={styles.navRoot}>
+          <Stack screenOptions={{ headerShown: false }} />
+          {resumeBiometricBlocking ? (
+            <View
+              style={[StyleSheet.absoluteFill, styles.resumeLockOverlay]}
+              pointerEvents="auto"
+              accessibilityElementsHidden
+              importantForAccessibility="no-hide-descendants"
+            />
+          ) : null}
+        </View>
+      </ThemeProvider>
+    </GestureHandlerRootView>
   );
 }
+
+const styles = StyleSheet.create({
+  navRoot: {
+    flex: 1,
+  },
+  resumeLockOverlay: {
+    backgroundColor: colors.background,
+  },
+});

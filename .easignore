@@ -1,3 +1,8 @@
+# When this file exists, EAS uses it instead of .gitignore for uploads.
+# Start from .gitignore, then add EAS-only rules. See:
+# https://docs.expo.dev/build-reference/easignore/
+
+# --- copied from .gitignore ---
 # Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
 
 # dependencies
@@ -40,3 +45,8 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# --- EAS-only: not needed to compile the app (smaller / simpler archive) ---
+supabase/
+architecture.md
+.vscode/

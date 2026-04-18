@@ -1,13 +1,14 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
-import { Link, Tabs } from 'expo-router';
+import { type Href, Redirect, Tabs, useRouter } from 'expo-router';
 import { Pressable } from 'react-native';
 
-import Colors from '@/constants/Colors';
-import { useColorScheme } from '@/components/useColorScheme';
 import { useClientOnlyValue } from '@/components/useClientOnlyValue';
+import { supabase } from '@/src/lib/supabase';
+import { useAppStore } from '@/src/store';
+import { colors } from '@/src/styles/theme';
+import type { DateFormat, FirstDayOfWeek, TemperatureUnit } from '@/src/types/database';
 
-// You can explore the built-in icon families and icons on the web at https://icons.expo.fyi/
 function TabBarIcon(props: {
   name: React.ComponentProps<typeof FontAwesome>['name'];
   color: string;
@@ -16,42 +17,78 @@ function TabBarIcon(props: {
 }
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme();
+  const router = useRouter();
+  const authHydrated = useAppStore((s) => s.authHydrated);
+  const session = useAppStore((s) => s.session);
+  const hydratePreferences = useAppStore((s) => s.hydratePreferences);
+
+  useEffect(() => {
+    if (!session?.user?.id) return;
+    void (async () => {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('temperature_unit, first_day_of_week, date_format')
+        .eq('id', session.user.id)
+        .maybeSingle();
+      if (error || !data) return;
+      const row = data as {
+        temperature_unit?: TemperatureUnit;
+        first_day_of_week?: FirstDayOfWeek;
+        date_format?: DateFormat;
+      };
+      hydratePreferences({
+        temperatureUnit: row.temperature_unit === 'C' ? 'C' : 'F',
+        firstDayOfWeek: row.first_day_of_week === 'Monday' ? 'Monday' : 'Sunday',
+        dateFormat: row.date_format === 'DD/MM/YYYY' ? 'DD/MM/YYYY' : 'MM/DD/YYYY',
+      });
+    })();
+  }, [session?.user?.id, hydratePreferences]);
+
+  if (!authHydrated) {
+    return null;
+  }
+
+  if (!session) {
+    return <Redirect href="/login" />;
+  }
 
   return (
     <Tabs
       screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
-        // Disable the static render of the header on web
-        // to prevent a hydration error in React Navigation v6.
+        tabBarActiveTintColor: colors.primarySageGreen,
         headerShown: useClientOnlyValue(false, true),
+        headerTintColor: colors.textDark,
+        headerStyle: { backgroundColor: colors.background },
+        headerRight: () => (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open menu"
+            onPress={() => router.push('/menu' as Href)}
+            hitSlop={12}
+            style={{ marginRight: 14, padding: 4 }}>
+            <FontAwesome name="bars" size={22} color={colors.textDark} />
+          </Pressable>
+        ),
       }}>
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Tab One',
-          tabBarIcon: ({ color }) => <TabBarIcon name="code" color={color} />,
-          headerRight: () => (
-            <Link href="/modal" asChild>
-              <Pressable>
-                {({ pressed }) => (
-                  <FontAwesome
-                    name="info-circle"
-                    size={25}
-                    color={Colors[colorScheme ?? 'light'].text}
-                    style={{ marginRight: 15, opacity: pressed ? 0.5 : 1 }}
-                  />
-                )}
-              </Pressable>
-            </Link>
-          ),
+          title: 'Dashboard',
+          tabBarIcon: ({ color }) => <TabBarIcon name="heartbeat" color={color} />,
         }}
       />
       <Tabs.Screen
-        name="two"
+        name="graphs"
         options={{
-          title: 'Tab Two',
-          tabBarIcon: ({ color }) => <TabBarIcon name="code" color={color} />,
+          title: 'Biometrics',
+          tabBarIcon: ({ color }) => <TabBarIcon name="line-chart" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="calendar"
+        options={{
+          title: 'Calendar',
+          tabBarIcon: ({ color }) => <TabBarIcon name="calendar" color={color} />,
         }}
       />
     </Tabs>
