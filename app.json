@@ -78,6 +78,21 @@
         }
       ],
       "expo-health-connect",
+      [
+        "react-native-health-connect",
+        {
+          "permissions": [
+            "READ_BASAL_BODY_TEMPERATURE",
+            "READ_BODY_TEMPERATURE",
+            "READ_HEART_RATE_VARIABILITY_RMSSD",
+            "READ_RESTING_HEART_RATE",
+            "READ_RESPIRATORY_RATE",
+            "READ_SLEEP_SESSION",
+            "READ_MENSTRUATION",
+            "READ_HEALTH_DATA_HISTORY"
+          ]
+        }
+      ],
       "./plugins/withAndroidHealthConnectDataPermissions",
       "./plugins/withHealthConnectMainActivity",
       [
