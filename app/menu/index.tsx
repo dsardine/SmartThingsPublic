@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import * as Sharing from 'expo-sharing';
+import { type Href, useRouter } from 'expo-router';
 
 import { PremiumPaywall } from '@/components/PremiumPaywall';
 import {
@@ -15,6 +16,7 @@ import { colors } from '@/src/styles/theme';
 import type { DateFormat, FirstDayOfWeek, TemperatureUnit } from '@/src/types/database';
 
 export default function MenuScreen() {
+  const router = useRouter();
   const session = useAppStore((s) => s.session);
   const prefs = useAppStore((s) => s.preferences);
   const setPreferences = useAppStore((s) => s.setPreferences);
@@ -23,6 +25,7 @@ export default function MenuScreen() {
   const [busy, setBusy] = useState(false);
   const [paywallOpen, setPaywallOpen] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
+  const [signOutBusy, setSignOutBusy] = useState(false);
 
   const persistProfile = useCallback(
     async (patch: {
@@ -105,6 +108,20 @@ export default function MenuScreen() {
       Alert.alert('Export failed', e instanceof Error ? e.message : 'Unknown error');
     } finally {
       setExportBusy(false);
+    }
+  };
+
+  const signOut = async () => {
+    setSignOutBusy(true);
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) {
+        Alert.alert('Sign out failed', error.message);
+        return;
+      }
+      router.replace('/login' as Href);
+    } finally {
+      setSignOutBusy(false);
     }
   };
 
@@ -203,6 +220,25 @@ export default function MenuScreen() {
         </Pressable>
       </View>
 
+      {session ? (
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Account</Text>
+          <Text style={styles.cardBody}>Signed in as {session.user.email ?? session.user.id}</Text>
+          <Pressable
+            style={[styles.signOutBtn, signOutBusy && styles.signOutBtnDisabled]}
+            onPress={() => void signOut()}
+            disabled={signOutBusy}
+            accessibilityRole="button"
+            accessibilityLabel="Sign out">
+            {signOutBusy ? (
+              <ActivityIndicator color={colors.mutedCoral} />
+            ) : (
+              <Text style={styles.signOutTxt}>Sign out</Text>
+            )}
+          </Pressable>
+        </View>
+      ) : null}
+
       <Modal visible={paywallOpen} animationType="slide" transparent onRequestClose={() => setPaywallOpen(false)}>
         <View style={styles.modalRoot}>
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setPaywallOpen(false)} />
@@ -267,4 +303,16 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     overflow: 'hidden',
   },
+  signOutBtn: {
+    marginTop: 4,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: colors.mutedCoral,
+    alignItems: 'center',
+    backgroundColor: colors.background,
+  },
+  signOutBtnDisabled: { opacity: 0.6 },
+  signOutTxt: { color: colors.mutedCoral, fontWeight: '800', fontSize: 15 },
 });

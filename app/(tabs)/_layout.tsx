@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { type Href, Redirect, Tabs, useRouter } from 'expo-router';
 import { ActivityIndicator, Pressable, View } from 'react-native';
@@ -21,28 +21,75 @@ export default function TabLayout() {
   const authHydrated = useAppStore((s) => s.authHydrated);
   const session = useAppStore((s) => s.session);
   const hydratePreferences = useAppStore((s) => s.hydratePreferences);
+  const [profileResolved, setProfileResolved] = useState(false);
+  const [allowTabs, setAllowTabs] = useState(false);
 
   useEffect(() => {
-    if (!session?.user?.id) return;
+    if (!session?.user?.id) {
+      setProfileResolved(false);
+      setAllowTabs(false);
+      return;
+    }
+
+    let cancelled = false;
+    setProfileResolved(false);
+    setAllowTabs(false);
+
     void (async () => {
       const { data, error } = await supabase
         .from('profiles')
-        .select('temperature_unit, first_day_of_week, date_format')
+        .select(
+          'temperature_unit, first_day_of_week, date_format, onboarding_completed, last_period_date, cycle_length_avg',
+        )
         .eq('id', session.user.id)
         .maybeSingle();
-      if (error || !data) return;
+
+      if (cancelled) return;
+
+      if (error) {
+        // Fail closed: never open the main app without a confirmed profile gate.
+        // (e.g. missing DB columns or RLS misconfiguration used to set allowTabs true and skip onboarding.)
+        router.replace('/onboarding' as Href);
+        setAllowTabs(false);
+        setProfileResolved(true);
+        return;
+      }
+
+      if (!data) {
+        router.replace('/onboarding' as Href);
+        setAllowTabs(false);
+        setProfileResolved(true);
+        return;
+      }
+
       const row = data as {
         temperature_unit?: TemperatureUnit;
         first_day_of_week?: FirstDayOfWeek;
         date_format?: DateFormat;
+        onboarding_completed?: boolean;
       };
+
       hydratePreferences({
         temperatureUnit: row.temperature_unit === 'C' ? 'C' : 'F',
         firstDayOfWeek: row.first_day_of_week === 'Monday' ? 'Monday' : 'Sunday',
         dateFormat: row.date_format === 'DD/MM/YYYY' ? 'DD/MM/YYYY' : 'MM/DD/YYYY',
       });
+
+      if (row.onboarding_completed !== true) {
+        router.replace('/onboarding' as Href);
+        setAllowTabs(false);
+        setProfileResolved(true);
+        return;
+      }
+
+      setAllowTabs(true);
+      setProfileResolved(true);
     })();
-  }, [session?.user?.id, hydratePreferences]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.user?.id, hydratePreferences, router]);
 
   if (!authHydrated) {
     return (
@@ -60,6 +107,24 @@ export default function TabLayout() {
 
   if (!session) {
     return <Redirect href="/login" />;
+  }
+
+  if (!profileResolved) {
+    return (
+      <View
+        style={{
+          flex: 1,
+          justifyContent: 'center',
+          alignItems: 'center',
+          backgroundColor: colors.background,
+        }}>
+        <ActivityIndicator size="large" color={colors.primarySageGreen} />
+      </View>
+    );
+  }
+
+  if (!allowTabs) {
+    return null;
   }
 
   return (

@@ -21,6 +21,33 @@ export type FertileWindowAlgorithmResult = {
   is_estimate: boolean;
 };
 
+export type ProfileCycleIntake = {
+  last_period_date: string;
+  cycle_length_avg: number;
+};
+
+function addCalendarDaysIso(iso: string, days: number): string {
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return iso;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+export function estimatedOvulationFromProfileIntake(intake: ProfileCycleIntake): string | null {
+  const { last_period_date, cycle_length_avg } = intake;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(last_period_date)) return null;
+  const cl = Math.round(Number(cycle_length_avg));
+  if (!Number.isFinite(cl) || cl < 21 || cl > 50) return null;
+  return addCalendarDaysIso(last_period_date, cl - 14);
+}
+
 export function effectiveChartedTemp(row: DailyFertilityInput): number | null {
   if (row.manual_bbt != null && Number.isFinite(row.manual_bbt)) {
     return row.manual_bbt;
@@ -52,9 +79,38 @@ function mergeByDate(sortedAsc: DailyFertilityInput[]): DailyFertilityInput[] {
   return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
 
+function noThermalShiftResult(
+  temperatureUnit: TemperatureUnitForAlgo,
+  profileFallback?: ProfileCycleIntake | null,
+): FertileWindowAlgorithmResult {
+  if (profileFallback) {
+    const est = estimatedOvulationFromProfileIntake(profileFallback);
+    if (est) {
+      return {
+        fertility_score: 46,
+        ai_narrative: `No sustained thermal shift matching the 3-over-6 rule yet. Using your intake cycle (${profileFallback.cycle_length_avg} days from LMP ${profileFallback.last_period_date}), approximate ovulation is ${est} (luteal-phase heuristic). Keep logging BBT or sleeping temperature plus RHR; we will replace this estimate once the chart confirms a shift (${temperatureUnit === "F" ? "≥0.4°F" : "≥0.2°C"} rule).`,
+        is_implantation_dip: false,
+        is_triphasic: false,
+        estimated_ovulation_date: est,
+        is_estimate: true,
+      };
+    }
+  }
+  return {
+    fertility_score: 44,
+    ai_narrative:
+      "No sustained thermal shift matching the 3-over-6 rule yet. Keep logging BBT or sleeping temperature plus RHR; we will flag ovulation once the pattern is clear.",
+    is_implantation_dip: false,
+    is_triphasic: false,
+    estimated_ovulation_date: null,
+    is_estimate: true,
+  };
+}
+
 export function calculateFertileWindow(
   dailySeriesAsc: DailyFertilityInput[],
   temperatureUnit: TemperatureUnitForAlgo,
+  profileFallback?: ProfileCycleIntake | null,
 ): FertileWindowAlgorithmResult {
   const series = mergeByDate(
     [...dailySeriesAsc].sort((a, b) => a.date.localeCompare(b.date)),
@@ -80,15 +136,7 @@ export function calculateFertileWindow(
   }
 
   if (chosenStart < 0) {
-    return {
-      fertility_score: 44,
-      ai_narrative:
-        "No sustained thermal shift matching the 3-over-6 rule yet. Keep logging BBT or sleeping temperature plus RHR; we will flag ovulation once the pattern is clear.",
-      is_implantation_dip: false,
-      is_triphasic: false,
-      estimated_ovulation_date: null,
-      is_estimate: true,
-    };
+    return noThermalShiftResult(temperatureUnit, profileFallback ?? null);
   }
 
   const i = chosenStart;

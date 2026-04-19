@@ -14,6 +14,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 
+import { estimatedOvulationFromProfileIntake } from '@/src/lib/algorithms';
 import { parseInsightText } from '@/src/lib/cachedInsight';
 import {
   addCalendarDays,
@@ -107,22 +108,57 @@ export default function CalendarScreen() {
       setFertileEnd(null);
       return;
     }
-    const { data } = await supabase
-      .from('cached_insight')
-      .select('insight_text')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    const ov = data?.insight_text ? parseInsightText(data.insight_text).estimatedOvulationDate : null;
-    if (ov) {
-      const o = parseIsoDate(ov);
+    const [{ data: insightRow }, { data: profileRow }] = await Promise.all([
+      supabase
+        .from('cached_insight')
+        .select('insight_text')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabase
+        .from('profiles')
+        .select('last_period_date, cycle_length_avg, onboarding_completed')
+        .eq('id', user.id)
+        .maybeSingle(),
+    ]);
+
+    const ovFromInsight = insightRow?.insight_text
+      ? parseInsightText(insightRow.insight_text).estimatedOvulationDate
+      : null;
+
+    if (ovFromInsight) {
+      const o = parseIsoDate(ovFromInsight);
       setFertileStart(isoDateString(addCalendarDays(o, -5)));
       setFertileEnd(isoDateString(addCalendarDays(o, 1)));
-    } else {
-      setFertileStart(null);
-      setFertileEnd(null);
+      return;
     }
+
+    const pr = profileRow as {
+      last_period_date?: string | null;
+      cycle_length_avg?: number | null;
+      onboarding_completed?: boolean | null;
+    } | null;
+
+    if (
+      pr?.onboarding_completed === true &&
+      typeof pr.last_period_date === 'string' &&
+      typeof pr.cycle_length_avg === 'number'
+    ) {
+      const est = estimatedOvulationFromProfileIntake({
+        last_period_date: pr.last_period_date,
+        cycle_length_avg: pr.cycle_length_avg,
+      });
+      if (est) {
+        const o = parseIsoDate(est);
+        setFertileStart(isoDateString(addCalendarDays(o, -5)));
+        setFertileEnd(isoDateString(addCalendarDays(o, 1)));
+        return;
+      }
+    }
+
+    setFertileStart(null);
+    setFertileEnd(null);
   }, []);
 
   useFocusEffect(

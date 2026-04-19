@@ -4,6 +4,7 @@ import {
   calculateFertileWindow,
   type DailyFertilityInput,
   type FertileWindowAlgorithmResult,
+  type ProfileCycleIntake,
   type TemperatureUnitForAlgo,
 } from "../_shared/algorithms.ts";
 
@@ -281,7 +282,9 @@ Deno.serve(async (req: Request) => {
 
   const { data: profile, error: profileReadError } = await admin
     .from("profiles")
-    .select("user_tier, temperature_unit")
+    .select(
+      "user_tier, temperature_unit, last_period_date, cycle_length_avg, onboarding_completed",
+    )
     .eq("id", user.id)
     .maybeSingle();
 
@@ -298,6 +301,22 @@ Deno.serve(async (req: Request) => {
 
   const tempRaw = (profile as Record<string, unknown> | null)?.temperature_unit;
   const temperatureUnit: TemperatureUnitForAlgo = tempRaw === "C" ? "C" : "F";
+
+  const prof = profile as Record<string, unknown> | null;
+  let profileFallback: ProfileCycleIntake | null = null;
+  const clRaw = prof?.cycle_length_avg;
+  const clNum = typeof clRaw === "number" ? clRaw : Number(clRaw);
+  if (
+    prof?.onboarding_completed === true &&
+    typeof prof.last_period_date === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(prof.last_period_date) &&
+    Number.isFinite(clNum)
+  ) {
+    profileFallback = {
+      last_period_date: prof.last_period_date,
+      cycle_length_avg: clNum,
+    };
+  }
 
   const dailySeries = await loadDailySeries(admin, user.id);
 
@@ -322,7 +341,7 @@ Deno.serve(async (req: Request) => {
   let unified: UnifiedScore;
 
   if (userTier === "free") {
-    const algo = calculateFertileWindow(dailySeries, temperatureUnit);
+    const algo = calculateFertileWindow(dailySeries, temperatureUnit, profileFallback);
     unified = rulesResultToUnified(algo);
   } else {
     const geminiKey = Deno.env.get("GEMINI_API_KEY");

@@ -39,6 +39,12 @@ export type ProfilesRow = {
   date_format: DateFormat;
   /** Drives cached vs fresh score generation (existing pipeline). */
   has_new_biometrics: boolean | null;
+  /** First day of last period (LMP) from Day-zero intake; ISO `YYYY-MM-DD`. */
+  last_period_date: string | null;
+  /** Typical cycle length in days; DB default `28`, constrained 21–50. */
+  cycle_length_avg: number;
+  /** When `false`, app routes to onboarding before tabs. */
+  onboarding_completed: boolean;
 } & Record<string, unknown>;
 
 export type ProfilesInsert = {
@@ -49,6 +55,9 @@ export type ProfilesInsert = {
   first_day_of_week?: FirstDayOfWeek;
   date_format?: DateFormat;
   has_new_biometrics?: boolean | null;
+  last_period_date?: string | null;
+  cycle_length_avg?: number;
+  onboarding_completed?: boolean;
 } & Record<string, unknown>;
 
 export type ProfilesUpdate = Partial<Omit<ProfilesRow, 'id'>> & Record<string, unknown>;
