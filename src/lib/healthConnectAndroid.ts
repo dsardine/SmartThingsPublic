@@ -246,9 +246,23 @@ async function readPagedRecordsSafe<T extends RecordType>(
 ): Promise<RecordResult<T>[]> {
   try {
     return await readPagedRecords(hc, recordType, timeRangeFilter);
-  } catch (e) {
-    const errorMsg = e instanceof Error ? e.message : String(e);
+  } catch (e: unknown) {
+    // Null-safe: native throws may omit `message`; JSON.stringify can throw on exotic values.
+    const raw = e as { message?: unknown } | null | undefined;
+    const fromMessage =
+      raw != null && typeof raw === 'object' && raw.message != null && String(raw.message).trim() !== ''
+        ? String(raw.message)
+        : '';
+    let fromJson = '';
+    try {
+      fromJson = JSON.stringify(e) ?? '';
+    } catch {
+      fromJson = '';
+    }
+    const errorMsg = fromMessage || fromJson || 'Unknown Native Error';
+
     Alert.alert(`Health Connect Error: ${recordType}`, errorMsg);
+
     if (__DEV__) {
       console.warn(`[HealthConnect] readRecords(${recordType}) failed:`, e);
     }
