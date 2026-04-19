@@ -66,6 +66,7 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
+      "./plugins/withAndroidSdkLocalProperties",
       "expo-router",
       "expo-background-fetch",
       "expo-local-authentication",
