@@ -1,21 +1,61 @@
+export const SCORE_ATTRIBUTION_WEARABLES =
+  'Score based on your wearable biometric trends (RHR & Temp).';
+export const SCORE_ATTRIBUTION_SYMPTOTHERMAL =
+  'Score verified via Symptothermal confirmation (Mucus + Vitals).';
+
+export type ScoreBasis = 'wearables' | 'symptothermal';
+
 export type ParsedInsight = {
   narrative: string;
+  /** Narrative with leading score-attribution line removed when `scoreBasis` is set. */
+  narrativeBody: string;
   estimatedOvulationDate: string | null;
   isImplantationDip: boolean;
   isTriphasic: boolean;
+  /** True when algorithms were bypassed (non–actively-cycling clinical state). */
+  clinicalEnginePaused: boolean;
+  /** Present when `cached_insight.insight_text` JSON includes `score_basis` (free tier passive scoring). */
+  scoreBasis: ScoreBasis | null;
+  /** Period/bleeding logs only — no BBT and no wearable rows (see generate-score data density). */
+  statisticalPeriodOnly: boolean;
 };
+
+/** Remove prepended attribution block so UI can show it separately. */
+export function stripScoreAttributionPrefix(narrative: string): string {
+  let t = narrative.trimStart();
+  for (const prefix of [SCORE_ATTRIBUTION_WEARABLES, SCORE_ATTRIBUTION_SYMPTOTHERMAL]) {
+    if (t.startsWith(prefix)) {
+      t = t.slice(prefix.length).trimStart();
+      if (t.startsWith('\n\n')) t = t.slice(2).trimStart();
+      return t;
+    }
+  }
+  return narrative;
+}
+
+function parseScoreBasis(raw: unknown): ScoreBasis | null {
+  if (raw === 'wearables' || raw === 'symptothermal') return raw;
+  return null;
+}
 
 export function parseInsightText(insightText: string): ParsedInsight {
   try {
     const o = JSON.parse(insightText) as Record<string, unknown>;
     if (typeof o.narrative === 'string') {
       const est = o.estimated_ovulation_date;
+      const scoreBasis = parseScoreBasis(o.score_basis);
+      const narrative = o.narrative;
       return {
-        narrative: o.narrative,
+        narrative,
+        narrativeBody:
+          scoreBasis != null ? stripScoreAttributionPrefix(narrative) : narrative,
         estimatedOvulationDate:
           typeof est === 'string' && est.trim() !== '' ? est.trim() : null,
         isImplantationDip: o.is_implantation_dip === true,
         isTriphasic: o.is_triphasic === true,
+        clinicalEnginePaused: o.clinical_engine_paused === true,
+        scoreBasis,
+        statisticalPeriodOnly: o.statistical_period_only === true,
       };
     }
   } catch {
@@ -23,9 +63,13 @@ export function parseInsightText(insightText: string): ParsedInsight {
   }
   return {
     narrative: insightText,
+    narrativeBody: insightText,
     estimatedOvulationDate: null,
     isImplantationDip: false,
     isTriphasic: false,
+    clinicalEnginePaused: false,
+    scoreBasis: null,
+    statisticalPeriodOnly: false,
   };
 }
 

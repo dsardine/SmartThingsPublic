@@ -16,14 +16,11 @@ function parseGhostManualOverlay(raw: string): Record<string, unknown> | null {
   }
   const excludeTemp = o.exclude_temp === true;
   let manualBbt: number | null = null;
-  if (!excludeTemp) {
-    const rawBbt = o.manual_bbt;
-    const s =
-      typeof rawBbt === 'string' ? rawBbt.trim() : rawBbt != null ? String(rawBbt) : '';
-    if (s) {
-      const n = Number(s);
-      manualBbt = Number.isFinite(n) ? n : null;
-    }
+  const rawBbt = o.manual_bbt;
+  const s = typeof rawBbt === 'string' ? rawBbt.trim() : rawBbt != null ? String(rawBbt) : '';
+  if (s) {
+    const n = Number(s);
+    manualBbt = Number.isFinite(n) ? n : null;
   }
   const ic = o.intercourse;
   const intercourse =
@@ -40,12 +37,16 @@ function parseGhostManualOverlay(raw: string): Record<string, unknown> | null {
       .filter(Boolean);
   }
 
-  return {
+  const out: Record<string, unknown> = {
     manual_bbt: manualBbt,
     intercourse,
     test_results,
     exclude_temp: excludeTemp,
   };
+  if (Array.isArray(o.disturbances) && o.disturbances.length > 0) {
+    out.disturbances = o.disturbances.map((x) => String(x));
+  }
+  return out;
 }
 
 /**
@@ -118,19 +119,24 @@ export function mergeDailyInputsForAlgorithms(
     const cur = map.get(d) ?? { date: d, manual_bbt: null, sleeping_temp: null, rhr: null };
     if (row.sleeping_temp != null) cur.sleeping_temp = Number(row.sleeping_temp);
     if (row.rhr != null) cur.rhr = Number(row.rhr);
+    if (row.hrv != null && Number.isFinite(Number(row.hrv))) cur.hrv = Number(row.hrv);
     map.set(d, cur);
   }
   for (const row of logs) {
     const d = typeof row.date === 'string' ? row.date : null;
     if (!d) continue;
     const cur = map.get(d) ?? { date: d, manual_bbt: null, sleeping_temp: null, rhr: null };
-    const excluded = row.exclude_temp === true;
-    if (excluded) {
-      cur.manual_bbt = null;
-    } else if (row.manual_bbt != null && Number.isFinite(Number(row.manual_bbt))) {
+    if (row.manual_bbt != null && Number.isFinite(Number(row.manual_bbt))) {
       cur.manual_bbt = Number(row.manual_bbt);
-    } else {
-      cur.manual_bbt = null;
+    }
+    if (row.exclude_temp === true) cur.exclude_temp = true;
+    const dist = row.disturbances;
+    if (Array.isArray(dist) && dist.length > 0) {
+      cur.disturbances = dist.map((x) => String(x));
+    }
+    const cf = row.cervical_fluid;
+    if (cf != null && String(cf).trim() !== '') {
+      cur.cervical_fluid = String(cf);
     }
     map.set(d, cur);
   }

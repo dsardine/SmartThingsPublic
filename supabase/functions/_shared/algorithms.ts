@@ -5,11 +5,17 @@
 
 export type TemperatureUnitForAlgo = "F" | "C";
 
+export type ClinicalState = "cycling" | "pregnant" | "postpartum" | "loss";
+
 export type DailyFertilityInput = {
   date: string;
   manual_bbt: number | null;
   sleeping_temp: number | null;
   rhr: number | null;
+  hrv?: number | null;
+  exclude_temp?: boolean | null;
+  disturbances?: string[] | null;
+  cervical_fluid?: string | null;
 };
 
 export type FertileWindowAlgorithmResult = {
@@ -19,6 +25,7 @@ export type FertileWindowAlgorithmResult = {
   is_triphasic: boolean;
   estimated_ovulation_date: string | null;
   is_estimate: boolean;
+  clinical_engine_paused?: boolean;
 };
 
 export type ProfileCycleIntake = {
@@ -30,6 +37,11 @@ export type ProfileCycleIntake = {
 export type ManualLogs = {
   date: string;
   bleeding: string | null;
+};
+
+export type CycleMathOptions = {
+  clinicalState?: ClinicalState;
+  cycleCountingAnchorIso?: string | null;
 };
 
 function mergeManualLogsByDateChronological(manualLogs: ManualLogs[]): ManualLogs[] {
@@ -60,11 +72,25 @@ function isFlowBleedingForCd1(b: string | null): boolean {
  * Rolling cycle length from logged bleeding.
  * CD1: Light/Medium/Heavy when prior day is not Light/Medium/Heavy (Spotting/null = non-flow). SYNC with app.
  */
-export function calculateDynamicCycleAverage(manualLogs: ManualLogs[], fallbackAverage: number): number {
+export function calculateDynamicCycleAverage(
+  manualLogs: ManualLogs[],
+  fallbackAverage: number,
+  options?: CycleMathOptions,
+): number {
   const fb = Math.round(Number(fallbackAverage));
   const safeFallback = Number.isFinite(fb) ? fb : 28;
 
-  const series = mergeManualLogsByDateChronological(manualLogs);
+  const state = options?.clinicalState ?? "cycling";
+  if (state !== "cycling") {
+    return safeFallback;
+  }
+
+  let series = mergeManualLogsByDateChronological(manualLogs);
+  const anchor = options?.cycleCountingAnchorIso;
+  if (typeof anchor === "string" && /^\d{4}-\d{2}-\d{2}$/.test(anchor)) {
+    series = series.filter((r) => r.date >= anchor);
+  }
+
   const byDate = new Map<string, string | null>();
   for (const row of series) {
     byDate.set(row.date, row.bleeding);
@@ -115,6 +141,7 @@ export function estimatedOvulationFromProfileIntake(intake: ProfileCycleIntake):
 }
 
 export function effectiveChartedTemp(row: DailyFertilityInput): number | null {
+  if (row.exclude_temp === true) return null;
   if (row.manual_bbt != null && Number.isFinite(row.manual_bbt)) {
     return row.manual_bbt;
   }
@@ -140,6 +167,14 @@ function mergeByDate(sortedAsc: DailyFertilityInput[]): DailyFertilityInput[] {
     if (row.manual_bbt != null) cur.manual_bbt = row.manual_bbt;
     if (row.sleeping_temp != null) cur.sleeping_temp = row.sleeping_temp;
     if (row.rhr != null) cur.rhr = row.rhr;
+    if (row.hrv != null && Number.isFinite(row.hrv)) cur.hrv = Number(row.hrv);
+    if (row.exclude_temp === true) cur.exclude_temp = true;
+    if (row.disturbances != null && row.disturbances.length > 0) {
+      cur.disturbances = [...row.disturbances];
+    }
+    if (row.cervical_fluid != null && String(row.cervical_fluid).trim() !== "") {
+      cur.cervical_fluid = String(row.cervical_fluid);
+    }
     byDate.set(row.date, cur);
   }
   return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
@@ -177,7 +212,22 @@ export function calculateFertileWindow(
   dailySeriesAsc: DailyFertilityInput[],
   temperatureUnit: TemperatureUnitForAlgo,
   profileFallback?: ProfileCycleIntake | null,
+  clinicalState?: ClinicalState,
 ): FertileWindowAlgorithmResult {
+  const state = clinicalState ?? "cycling";
+  if (state !== "cycling") {
+    return {
+      fertility_score: 0,
+      ai_narrative:
+        "Sardine has paused fertile-window and ovulation timing while you are not charting as usual. Symptothermal rules stay off so nothing here guesses fertile days for you. When you are ready, choose Charting as usual under Preferences — we can anchor a fresh cycle count from that point.",
+      is_implantation_dip: false,
+      is_triphasic: false,
+      estimated_ovulation_date: null,
+      is_estimate: true,
+      clinical_engine_paused: true,
+    };
+  }
+
   const series = mergeByDate(
     [...dailySeriesAsc].sort((a, b) => a.date.localeCompare(b.date)),
   );

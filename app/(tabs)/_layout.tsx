@@ -7,7 +7,13 @@ import { useClientOnlyValue } from '@/components/useClientOnlyValue';
 import { supabase } from '@/src/lib/supabase';
 import { useAppStore } from '@/src/store';
 import { colors } from '@/src/styles/theme';
-import type { DateFormat, FirstDayOfWeek, TemperatureUnit } from '@/src/types/database';
+import type {
+  ClinicalState,
+  DateFormat,
+  FirstDayOfWeek,
+  TemperatureUnit,
+  TrackingGoal,
+} from '@/src/types/database';
 
 function TabBarIcon(props: {
   name: React.ComponentProps<typeof FontAwesome>['name'];
@@ -22,6 +28,7 @@ export default function TabLayout() {
   const session = useAppStore((s) => s.session);
   const hydratePreferences = useAppStore((s) => s.hydratePreferences);
   const hydrateCycleLengthFromProfile = useAppStore((s) => s.hydrateCycleLengthFromProfile);
+  const hydrateClinicalFromProfile = useAppStore((s) => s.hydrateClinicalFromProfile);
   const isGhostModeEnabled = useAppStore((s) => s.isGhostModeEnabled);
   const [profileResolved, setProfileResolved] = useState(false);
   const [allowTabs, setAllowTabs] = useState(false);
@@ -41,7 +48,7 @@ export default function TabLayout() {
       const { data, error } = await supabase
         .from('profiles')
         .select(
-          'temperature_unit, first_day_of_week, date_format, bbt_time_format, onboarding_completed, last_period_date, cycle_length_avg',
+          'temperature_unit, first_day_of_week, date_format, bbt_time_format, onboarding_completed, last_period_date, cycle_length_avg, clinical_state, tracking_goal, clinical_cycle_anchor_iso',
         )
         .eq('id', session.user.id)
         .maybeSingle();
@@ -71,6 +78,10 @@ export default function TabLayout() {
         bbt_time_format?: string | null;
         onboarding_completed?: boolean;
         cycle_length_avg?: number | null;
+        last_period_date?: string | null;
+        clinical_state?: ClinicalState | null;
+        tracking_goal?: TrackingGoal | null;
+        clinical_cycle_anchor_iso?: string | null;
       };
 
       hydratePreferences({
@@ -87,6 +98,14 @@ export default function TabLayout() {
       hydrateCycleLengthFromProfile({
         serverCycleLengthAvg: serverCl,
         isGhostMode: isGhostModeEnabled,
+        lastPeriodDateIso:
+          typeof row.last_period_date === 'string' ? row.last_period_date : null,
+      });
+
+      hydrateClinicalFromProfile({
+        clinical_state: row.clinical_state ?? undefined,
+        tracking_goal: row.tracking_goal ?? undefined,
+        clinical_cycle_anchor_iso: row.clinical_cycle_anchor_iso ?? undefined,
       });
 
       if (row.onboarding_completed !== true) {
@@ -103,7 +122,14 @@ export default function TabLayout() {
     return () => {
       cancelled = true;
     };
-  }, [session?.user?.id, hydratePreferences, hydrateCycleLengthFromProfile, isGhostModeEnabled, router]);
+  }, [
+    session?.user?.id,
+    hydratePreferences,
+    hydrateCycleLengthFromProfile,
+    hydrateClinicalFromProfile,
+    isGhostModeEnabled,
+    router,
+  ]);
 
   if (!authHydrated) {
     return (

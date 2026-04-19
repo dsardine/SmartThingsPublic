@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -13,6 +13,9 @@ import {
 } from 'react-native';
 import * as Sharing from 'expo-sharing';
 import { type Href, useFocusEffect, useRouter } from 'expo-router';
+
+import { formatCalendarDate, isoDateString, parseIsoDate } from '@/src/lib/dateDisplay';
+import { LIFE_STAGE_CHOICES, WHY_HERE_OPTIONS } from '@/src/lib/userCyclePreferencesCopy';
 
 import { PremiumPaywall } from '@/components/PremiumPaywall';
 import {
@@ -35,17 +38,37 @@ import {
   healthKitRequestReadPermissions,
 } from '@/src/lib/healthKitIOS';
 import { supabase } from '@/src/lib/supabase';
+import {
+  getTrackOnlyBbtDailyRemindersOptIn,
+  setTrackOnlyBbtDailyRemindersOptIn,
+} from '@/src/lib/trackOnlyNotificationPrefs';
 import { useAppStore } from '@/src/store';
 import { colors } from '@/src/styles/theme';
-import type { BbtTimeFormat, DateFormat, FirstDayOfWeek, TemperatureUnit } from '@/src/types/database';
+import type {
+  BbtTimeFormat,
+  ClinicalState,
+  DateFormat,
+  FirstDayOfWeek,
+  TemperatureUnit,
+  TrackingGoal,
+} from '@/src/types/database';
 
 export default function MenuScreen() {
   const router = useRouter();
   const session = useAppStore((s) => s.session);
   const prefs = useAppStore((s) => s.preferences);
   const setPreferences = useAppStore((s) => s.setPreferences);
+  const hydrateClinicalFromProfile = useAppStore((s) => s.hydrateClinicalFromProfile);
+  const hydrateCycleLengthFromProfile = useAppStore((s) => s.hydrateCycleLengthFromProfile);
+  const clinicalState = useAppStore((s) => s.clinicalState);
+  const trackingGoal = useAppStore((s) => s.trackingGoal);
+  const setClinicalState = useAppStore((s) => s.setClinicalState);
+  const setTrackingGoal = useAppStore((s) => s.setTrackingGoal);
+  const setClinicalCycleAnchorIso = useAppStore((s) => s.setClinicalCycleAnchorIso);
   const isGhost = useAppStore((s) => s.isGhostModeEnabled);
   const setGhost = useAppStore((s) => s.setGhostModeEnabled);
+  const lastPeriodDateIso = useAppStore((s) => s.lastPeriodDateIso);
+  const cycleLengthAvg = useAppStore((s) => s.cycleLengthAvg);
   const [busy, setBusy] = useState(false);
   const [paywallOpen, setPaywallOpen] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
@@ -58,11 +81,43 @@ export default function MenuScreen() {
   /** `null` = import all history Health Connect allows (passes `null` as lookback). */
   const [hcLookbackChoice, setHcLookbackChoice] = useState<60 | 180 | null>(60);
   const [hcImportBusy, setHcImportBusy] = useState(false);
+  const [trackOnlyBbtOptIn, setTrackOnlyBbtOptIn] = useState(getTrackOnlyBbtDailyRemindersOptIn);
+
+  useEffect(() => {
+    setTrackOnlyBbtOptIn(getTrackOnlyBbtDailyRemindersOptIn());
+  }, [trackingGoal]);
 
   useFocusEffect(
     useCallback(() => {
       let alive = true;
       void (async () => {
+        if (session?.user?.id) {
+          const { data } = await supabase
+            .from('profiles')
+            .select(
+              'clinical_state, tracking_goal, clinical_cycle_anchor_iso, last_period_date, cycle_length_avg',
+            )
+            .eq('id', session.user.id)
+            .maybeSingle();
+          if (alive && data) {
+            hydrateClinicalFromProfile({
+              clinical_state: data.clinical_state as ClinicalState | undefined,
+              tracking_goal: data.tracking_goal as TrackingGoal | undefined,
+              clinical_cycle_anchor_iso: (data as { clinical_cycle_anchor_iso?: string | null })
+                .clinical_cycle_anchor_iso,
+            });
+            const row = data as { cycle_length_avg?: number | null; last_period_date?: string | null };
+            const serverCl =
+              typeof row.cycle_length_avg === 'number' && Number.isFinite(row.cycle_length_avg)
+                ? Math.round(row.cycle_length_avg)
+                : 28;
+            hydrateCycleLengthFromProfile({
+              serverCycleLengthAvg: serverCl,
+              isGhostMode: isGhost,
+              lastPeriodDateIso: typeof row.last_period_date === 'string' ? row.last_period_date : null,
+            });
+          }
+        }
         if (Platform.OS === 'android') {
           const [summary, granted] = await Promise.all([
             getHealthConnectMenuSummary(),
@@ -89,7 +144,7 @@ export default function MenuScreen() {
       return () => {
         alive = false;
       };
-    }, []),
+    }, [session?.user?.id, hydrateClinicalFromProfile, hydrateCycleLengthFromProfile, isGhost]),
   );
 
   const persistProfile = useCallback(
@@ -132,6 +187,73 @@ export default function MenuScreen() {
   const setBbtTimeFmt = (tf: BbtTimeFormat) => {
     setPreferences({ bbtTimeFormat: tf });
     void persistProfile({ bbt_time_format: tf });
+  };
+
+  const applyClinicalState = async (next: ClinicalState) => {
+    if (!session?.user?.id || isGhost) return;
+    const prev = useAppStore.getState().clinicalState;
+    const todayIso = isoDateString(new Date());
+    const patch: {
+      clinical_state: ClinicalState;
+      clinical_cycle_anchor_iso?: string | null;
+    } = { clinical_state: next };
+    if (next !== 'cycling') {
+      patch.clinical_cycle_anchor_iso = null;
+    } else if (prev !== 'cycling') {
+      const anchor = useAppStore.getState().clinicalCycleAnchorIso;
+      patch.clinical_cycle_anchor_iso = anchor ?? todayIso;
+    }
+    setBusy(true);
+    try {
+      const { error } = await supabase.from('profiles').update(patch).eq('id', session.user.id);
+      if (error) {
+        Alert.alert('Could not save', error.message);
+        return;
+      }
+      setClinicalState(next);
+      if (next !== 'cycling') {
+        setClinicalCycleAnchorIso(null);
+      } else {
+        setClinicalCycleAnchorIso(patch.clinical_cycle_anchor_iso ?? todayIso);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onClinicalChoice = (next: ClinicalState) => {
+    if (!session?.user?.id || isGhost) return;
+    if (next === clinicalState) return;
+    if (next === 'loss' || next === 'postpartum') {
+      Alert.alert(
+        "We'll give this space",
+        'Sardine pauses fertile-window and ovulation math here, so the dashboard will not nudge you about timing. Your calendar and notes stay with you. When you pick Charting as usual again, we start fresh from today — or from a new period you have already logged.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Continue', onPress: () => void applyClinicalState(next) },
+        ],
+      );
+      return;
+    }
+    void applyClinicalState(next);
+  };
+
+  const applyTrackingGoal = async (g: TrackingGoal) => {
+    if (!session?.user?.id || isGhost) return;
+    setBusy(true);
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({ tracking_goal: g })
+        .eq('id', session.user.id);
+      if (error) {
+        Alert.alert('Could not save', error.message);
+        return;
+      }
+      setTrackingGoal(g);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const sharePdf = async () => {
@@ -238,6 +360,44 @@ export default function MenuScreen() {
     }
   };
 
+  const clearIntakeLastPeriodDate = () => {
+    const uid = session?.user?.id;
+    if (!uid || isGhost || !lastPeriodDateIso) return;
+    Alert.alert(
+      'Remove saved period start?',
+      'This clears the first-day-of-last-period date from onboarding. Forecasts that depended only on that day will ease off until you log period flow on the calendar (or we add a way to set a new anchor).',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setBusy(true);
+              try {
+                const { error } = await supabase
+                  .from('profiles')
+                  .update({ last_period_date: null })
+                  .eq('id', uid);
+                if (error) {
+                  Alert.alert('Could not save', error.message);
+                  return;
+                }
+                hydrateCycleLengthFromProfile({
+                  serverCycleLengthAvg: cycleLengthAvg,
+                  isGhostMode: false,
+                  lastPeriodDateIso: null,
+                });
+              } finally {
+                setBusy(false);
+              }
+            })();
+          },
+        },
+      ],
+    );
+  };
+
   const signOut = async () => {
     setSignOutBusy(true);
     try {
@@ -256,6 +416,97 @@ export default function MenuScreen() {
     <ScrollView contentContainerStyle={styles.root} keyboardShouldPersistTaps="handled">
       <Text style={styles.title}>Preferences</Text>
       <Text style={styles.sub}>Locale, calendar, and Ghost Mode stay yours — we just sync what you allow.</Text>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>How Sardine works for you</Text>
+        <Text style={styles.cardBody}>
+          Right now tells us whether to run fertile-window and ovulation timing. What brings you here only changes
+          reminders and how we talk about your chart — same choices as when you signed up.
+        </Text>
+        {isGhost ? (
+          <Text style={styles.cardBody}>
+            Sign in and turn off Ghost Mode to save these choices to your account.
+          </Text>
+        ) : (
+          <>
+            <Text style={[styles.rowLbl, { marginBottom: 8 }]}>Right now</Text>
+            <View style={styles.segment}>
+              {LIFE_STAGE_CHOICES.map(({ value: st, title }) => (
+                <Pressable
+                  key={st}
+                  style={[styles.segBtn, st === clinicalState && styles.segBtnOn]}
+                  onPress={() => onClinicalChoice(st)}
+                  disabled={busy}
+                  accessibilityRole="button"
+                  accessibilityLabel={title}>
+                  <Text style={[styles.segTxt, st === clinicalState && styles.segTxtOn]}>{title}</Text>
+                </Pressable>
+              ))}
+            </View>
+            <Text style={[styles.rowLbl, { marginBottom: 8, marginTop: 14 }]}>What brings you here?</Text>
+            <View style={styles.segment}>
+              {WHY_HERE_OPTIONS.map(({ value: g, title }) => (
+                <Pressable
+                  key={g}
+                  style={[styles.segBtn, g === trackingGoal && styles.segBtnOn]}
+                  onPress={() => void applyTrackingGoal(g)}
+                  disabled={busy}
+                  accessibilityRole="button"
+                  accessibilityLabel={title}>
+                  <Text style={[styles.segTxt, g === trackingGoal && styles.segTxtOn]}>{title}</Text>
+                </Pressable>
+              ))}
+            </View>
+            <Text style={[styles.cardHint, { marginTop: 12, marginBottom: 0 }]}>
+              {WHY_HERE_OPTIONS.find((o) => o.value === trackingGoal)?.subtitle ?? ''}
+            </Text>
+            {trackingGoal === 'track_only' ? (
+              <View style={{ marginTop: 16 }}>
+                <View style={styles.row}>
+                  <Text style={styles.rowLbl}>Daily BBT reminders</Text>
+                  <Switch
+                    value={trackOnlyBbtOptIn}
+                    onValueChange={(v) => {
+                      setTrackOnlyBbtOptIn(v);
+                      setTrackOnlyBbtDailyRemindersOptIn(v);
+                    }}
+                    trackColor={{ true: colors.primarySageGreen, false: colors.chartGrid }}
+                  />
+                </View>
+                <Text style={[styles.cardBody, { marginBottom: 0 }]}>
+                  {`Off by default for "Just understanding my cycle." Turn on only if you want a daily nudge to log temperature. High-level heads-ups (for example period timing) can ship separately when we add scheduled alerts.`}
+                </Text>
+              </View>
+            ) : null}
+          </>
+        )}
+      </View>
+
+      {!isGhost && session?.user?.id ? (
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Day-zero period start</Text>
+          <Text style={styles.cardBody}>
+            The first day of your last period from onboarding helps shade the calendar until your log and temps
+            catch up. Remove it here if that date was entered wrong.
+          </Text>
+          <Text style={styles.rowLbl}>Saved on your profile</Text>
+          <Text style={[styles.cardBody, { marginBottom: 0 }]}>
+            {lastPeriodDateIso
+              ? formatCalendarDate(parseIsoDate(lastPeriodDateIso), prefs.dateFormat, true)
+              : 'None — use the calendar when you log flow.'}
+          </Text>
+          {lastPeriodDateIso ? (
+            <Pressable
+              style={[styles.secondaryOutlineBtn, { marginTop: 12 }]}
+              onPress={clearIntakeLastPeriodDate}
+              disabled={busy}
+              accessibilityRole="button"
+              accessibilityLabel="Remove saved last period start date from profile">
+              <Text style={styles.secondaryOutlineBtnTxt}>Remove saved date</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
 
       {Platform.OS === 'android' || Platform.OS === 'ios' ? (
         <View style={styles.card}>
@@ -535,6 +786,7 @@ const styles = StyleSheet.create({
   },
   cardTitle: { fontSize: 16, fontWeight: '800', color: colors.textDark, marginBottom: 6 },
   cardBody: { fontSize: 14, color: colors.textMuted, lineHeight: 20, marginBottom: 12 },
+  cardHint: { fontSize: 13, color: colors.textMuted, lineHeight: 18 },
   row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   rowLbl: { fontSize: 15, fontWeight: '600', color: colors.textDark },
   segment: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },

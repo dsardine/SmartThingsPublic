@@ -4,16 +4,25 @@
  */
 
 import { addCalendarDays, isoDateString, parseIsoDate } from '@/src/lib/dateDisplay';
-import type { ManualLogBleeding } from '@/src/types/database';
+import type { ClinicalState, ManualLogBleeding } from '@/src/types/database';
 
 export type TemperatureUnitForAlgo = 'F' | 'C';
 
 /** One calendar day of chartable inputs (manual BBT overrides wearable temp). */
 export type DailyFertilityInput = {
   date: string;
+  /** Logged BBT value; kept even when `exclude_temp` so AI / exports can reference the reading. */
   manual_bbt: number | null;
   sleeping_temp: number | null;
   rhr: number | null;
+  /** Wearable HRV (e.g. SDNN ms); used for passive scoring when mucus is absent. */
+  hrv?: number | null;
+  /** When true, `effectiveChartedTemp` ignores both manual and sleeping temps for charting and thermal rules. */
+  exclude_temp?: boolean | null;
+  /** Disturbance tags (manual log); informational for AI, not used in `effectiveChartedTemp`. */
+  disturbances?: string[] | null;
+  /** Cervical fluid (manual log); used by AI / premium context, not in 3-over-6 math. */
+  cervical_fluid?: string | null;
 };
 
 export type FertileWindowAlgorithmResult = {
@@ -25,6 +34,8 @@ export type FertileWindowAlgorithmResult = {
   estimated_ovulation_date: string | null;
   /** True when RHR does not confirm the shift or data are sparse. */
   is_estimate: boolean;
+  /** When true, `clinical_state` is not `cycling` and thermal/ovulation rules were bypassed. */
+  clinical_engine_paused?: boolean;
 };
 
 /** Day-zero intake: LMP + typical cycle length (used when temps are not yet decisive). */
@@ -68,16 +79,37 @@ function isFlowBleedingForCd1(b: ManualLogBleeding | null): boolean {
   return b === 'Light' || b === 'Medium' || b === 'Heavy';
 }
 
+export type CycleMathOptions = {
+  clinicalState?: ClinicalState;
+  /** Ignore bleeding rows strictly before this ISO date when finding CD1 pairs (post–pregnancy/loss reset). */
+  cycleCountingAnchorIso?: string | null;
+};
+
 /**
  * Sprint 7 — rolling cycle length from logged bleeding.
  * CD1: Light/Medium/Heavy when the prior calendar day is not Light/Medium/Heavy (Spotting/null count as non-flow).
  * Fewer than two valid lengths (21–45d) after outlier exclusion → `fallbackAverage` (onboarding seed).
+ *
+ * When `clinicalState` is not `'cycling'`, returns `fallbackAverage` without recomputing (algorithms paused).
  */
-export function calculateDynamicCycleAverage(manualLogs: ManualLogs[], fallbackAverage: number): number {
+export function calculateDynamicCycleAverage(
+  manualLogs: ManualLogs[],
+  fallbackAverage: number,
+  options?: CycleMathOptions,
+): number {
   const fb = Math.round(Number(fallbackAverage));
   const safeFallback = Number.isFinite(fb) ? fb : 28;
 
-  const series = mergeManualLogsByDateChronological(manualLogs);
+  const state = options?.clinicalState ?? 'cycling';
+  if (state !== 'cycling') {
+    return safeFallback;
+  }
+
+  let series = mergeManualLogsByDateChronological(manualLogs);
+  const anchor = options?.cycleCountingAnchorIso;
+  if (typeof anchor === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(anchor)) {
+    series = series.filter((r) => r.date >= anchor);
+  }
   const byDate = new Map<string, ManualLogBleeding | null>();
   for (const row of series) {
     byDate.set(row.date, row.bleeding);
@@ -105,8 +137,12 @@ export function calculateDynamicCycleAverage(manualLogs: ManualLogs[], fallbackA
   return Math.round(mean);
 }
 
-/** Data priority: `manual_bbt` first, else `sleeping_temp`. */
+/**
+ * Chart / thermal-rule temperature: `manual_bbt` first, else `sleeping_temp`.
+ * When `exclude_temp` is true (disturbed day), returns null so coverlines and 3-over-6 ignore both sources.
+ */
 export function effectiveChartedTemp(row: DailyFertilityInput): number | null {
+  if (row.exclude_temp === true) return null;
   if (row.manual_bbt != null && Number.isFinite(row.manual_bbt)) {
     return row.manual_bbt;
   }
@@ -132,6 +168,14 @@ function mergeByDate(sortedAsc: DailyFertilityInput[]): DailyFertilityInput[] {
     if (row.manual_bbt != null) cur.manual_bbt = row.manual_bbt;
     if (row.sleeping_temp != null) cur.sleeping_temp = row.sleeping_temp;
     if (row.rhr != null) cur.rhr = row.rhr;
+    if (row.hrv != null && Number.isFinite(row.hrv)) cur.hrv = Number(row.hrv);
+    if (row.exclude_temp === true) cur.exclude_temp = true;
+    if (row.disturbances != null && row.disturbances.length > 0) {
+      cur.disturbances = [...row.disturbances];
+    }
+    if (row.cervical_fluid != null && String(row.cervical_fluid).trim() !== '') {
+      cur.cervical_fluid = String(row.cervical_fluid);
+    }
     byDate.set(row.date, cur);
   }
   return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
@@ -189,12 +233,29 @@ function noThermalShiftResult(
  *
  * When no shift is detected and `profileFallback` is provided, uses LMP + cycle length
  * for an approximate ovulation date until enough biometric data exist.
+ *
+ * When `clinicalState` is not `'cycling'`, returns a paused result (no thermal / ovulation math).
  */
 export function calculateFertileWindow(
   dailySeriesAsc: DailyFertilityInput[],
   temperatureUnit: TemperatureUnitForAlgo,
   profileFallback?: ProfileCycleIntake | null,
+  clinicalState?: ClinicalState,
 ): FertileWindowAlgorithmResult {
+  const state = clinicalState ?? 'cycling';
+  if (state !== 'cycling') {
+    return {
+      fertility_score: 0,
+      ai_narrative:
+        'Sardine has paused fertile-window and ovulation timing while you are not charting as usual. Symptothermal rules stay off so nothing here guesses fertile days for you. When you are ready, choose Charting as usual under Preferences — we can anchor a fresh cycle count from that point.',
+      is_implantation_dip: false,
+      is_triphasic: false,
+      estimated_ovulation_date: null,
+      is_estimate: true,
+      clinical_engine_paused: true,
+    };
+  }
+
   const series = mergeByDate(
     [...dailySeriesAsc].sort((a, b) => a.date.localeCompare(b.date)),
   );
@@ -258,7 +319,11 @@ export function calculateFertileWindow(
 export function getAlgorithmicCoverlineY(
   dailySeriesAsc: DailyFertilityInput[],
   temperatureUnit: TemperatureUnitForAlgo,
+  clinicalState?: ClinicalState,
 ): { coverlineY: number; shiftStartDate: string } | null {
+  if ((clinicalState ?? 'cycling') !== 'cycling') {
+    return null;
+  }
   const series = mergeByDate(
     [...dailySeriesAsc].sort((a, b) => a.date.localeCompare(b.date)),
   );

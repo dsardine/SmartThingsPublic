@@ -96,6 +96,7 @@ export default function GraphsScreen() {
   const [markerLabel] = useState('Ovulation estimated');
   const [active, setActive] = useState<Metric>('temp');
   const temperatureUnit = useAppStore((s) => s.preferences.temperatureUnit);
+  const clinicalState = useAppStore((s) => s.clinicalState);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -122,7 +123,7 @@ export default function GraphsScreen() {
         .order('date', { ascending: true }),
       supabase
         .from('manual_logs')
-        .select('date, manual_bbt, intercourse, test_results')
+        .select('date, manual_bbt, exclude_temp, disturbances, intercourse, test_results')
         .eq('user_id', user.id)
         .gte('date', startIso)
         .order('date', { ascending: true }),
@@ -161,6 +162,7 @@ export default function GraphsScreen() {
         manual_bbt: cur.manBbt,
         sleeping_temp: cur.sleepRaw,
         rhr: row.rhr != null ? Number(row.rhr) : null,
+        exclude_temp: undefined,
       };
       const t = effectiveChartedTemp(mergedRow);
       cur.temp = t;
@@ -184,16 +186,21 @@ export default function GraphsScreen() {
         manBbt: null,
         hasGhostManualEntry: false,
       };
-      if (row.exclude_temp !== true && row.manual_bbt != null) {
-        cur.manBbt = Number(row.manual_bbt);
-      } else if (row.exclude_temp === true) {
-        cur.manBbt = null;
-      }
+      const rec =
+        row.manual_bbt != null && String(row.manual_bbt).trim() !== ''
+          ? Number(row.manual_bbt)
+          : null;
+      if (rec != null && Number.isFinite(rec)) cur.manBbt = rec;
+      const dist = row.disturbances;
+      const disturbances =
+        Array.isArray(dist) && dist.length > 0 ? dist.map((x) => String(x)) : null;
       cur.temp = effectiveChartedTemp({
         date: d,
-        manual_bbt: cur.manBbt,
+        manual_bbt: rec,
         sleeping_temp: cur.sleepRaw,
         rhr: cur.rhr,
+        exclude_temp: row.exclude_temp === true,
+        disturbances,
       });
       if (row.intercourse != null) cur.intercourse = true;
       const tr = row.test_results;
@@ -223,8 +230,8 @@ export default function GraphsScreen() {
 
   const cover = useMemo(() => {
     if (active !== 'temp') return null;
-    return getAlgorithmicCoverlineY(mergedAsc, temperatureUnit);
-  }, [active, mergedAsc, temperatureUnit]);
+    return getAlgorithmicCoverlineY(mergedAsc, temperatureUnit, clinicalState);
+  }, [active, mergedAsc, temperatureUnit, clinicalState]);
 
   const { polyPoints, coverYpx, minV, maxV, ovulationIndex } = useMemo(() => {
     const vals = days.map((d) => valueForMetric(d, active)).filter((v): v is number => v != null);

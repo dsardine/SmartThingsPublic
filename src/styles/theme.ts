@@ -4,6 +4,10 @@
  */
 export const colors = {
   primarySageGreen: '#9CAE96',
+  /** Track-only / low-pressure accents (distinct from fertility coral). */
+  cycleNeutralTeal: '#5A8F89',
+  /** Period-only / statistical pulse — muted grey-teal (not “confirmed” vitals). */
+  pulseEstimateMuted: '#8AA3A0',
   softLavender: '#D1C4E9',
   mutedCoral: '#F0A8A8',
   background: '#FAFAFA',

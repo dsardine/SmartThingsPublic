@@ -17,11 +17,17 @@ export type DateFormat = 'MM/DD/YYYY' | 'DD/MM/YYYY';
 /** How manual BBT "time taken" is shown; storage remains `HH:MM` 24-hour. */
 export type BbtTimeFormat = '12h' | '24h';
 
+/** Reproductive phase for algorithm gating (profiles.clinical_state). */
+export type ClinicalState = 'cycling' | 'pregnant' | 'postpartum' | 'loss';
+
+/** User intent for in-app prioritization (profiles.tracking_goal). */
+export type TrackingGoal = 'conceive' | 'avoid' | 'track_only';
+
 export type ManualLogBleeding = 'Spotting' | 'Light' | 'Medium' | 'Heavy';
 
 export type ManualLogIntercourse = 'Protected' | 'Unprotected' | 'Insemination';
 
-export type ManualLogCervicalFluid = 'Dry' | 'Sticky' | 'Creamy' | 'Eggwhite';
+export type ManualLogCervicalFluid = 'Dry' | 'Sticky' | 'Creamy' | 'Eggwhite' | 'Watery';
 
 export type ManualLogCervicalPosition = 'High' | 'Medium' | 'Low';
 
@@ -50,6 +56,10 @@ export type ProfilesRow = {
   cycle_length_avg: number;
   /** When `false`, app routes to onboarding before tabs. */
   onboarding_completed: boolean;
+  clinical_state: ClinicalState;
+  tracking_goal: TrackingGoal;
+  /** First calendar date included in rolling CD1 math after resuming `cycling` from pregnancy/loss/postpartum. */
+  clinical_cycle_anchor_iso: string | null;
 } & Record<string, unknown>;
 
 export type ProfilesInsert = {
@@ -64,6 +74,9 @@ export type ProfilesInsert = {
   last_period_date?: string | null;
   cycle_length_avg?: number;
   onboarding_completed?: boolean;
+  clinical_state?: ClinicalState;
+  tracking_goal?: TrackingGoal;
+  clinical_cycle_anchor_iso?: string | null;
 } & Record<string, unknown>;
 
 export type ProfilesUpdate = Partial<Omit<ProfilesRow, 'id'>> & Record<string, unknown>;

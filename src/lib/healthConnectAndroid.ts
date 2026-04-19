@@ -2,7 +2,10 @@ import { Platform } from 'react-native';
 
 import { addCalendarDays, isoDateString, parseIsoDate } from '@/src/lib/dateDisplay';
 import { GHOST_MANUAL_KEY_PREFIX } from '@/src/lib/manualGhostMerge';
-import { persistDynamicCycleLengthAfterBleedingLog } from '@/src/lib/persistDynamicCycleLength';
+import {
+  maybeSetClinicalCycleAnchorAfterMenstrualCd1,
+  persistDynamicCycleLengthAfterBleedingLog,
+} from '@/src/lib/persistDynamicCycleLength';
 import { ghostStorage } from '@/src/lib/storage';
 import { supabase } from '@/src/lib/supabase';
 import type { ManualLogBleeding, TemperatureUnit } from '@/src/types/database';
@@ -700,6 +703,11 @@ export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
       const { error: insErr } = await supabase.from('manual_logs').insert(row);
       if (insErr) return { ok: false, reason: insErr.message };
     }
+    await maybeSetClinicalCycleAnchorAfterMenstrualCd1({
+      userId: userId!,
+      logDateIso: iso,
+      bleeding: (row.bleeding as ManualLogBleeding | null) ?? null,
+    });
   }
 
   const bioRes = await mergeHcBiometricsToSupabase(userId!, bioByDate);
@@ -708,7 +716,13 @@ export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
   }
 
   if (bioByDate.size > 0) {
-    await supabase.from('profiles').update({ has_new_biometrics: true }).eq('id', userId!);
+    const { error: flagErr } = await supabase
+      .from('profiles')
+      .update({ has_new_biometrics: true })
+      .eq('id', userId!);
+    if (flagErr) {
+      console.warn('profiles has_new_biometrics (optional column):', flagErr.message);
+    }
   }
 
   await persistDynamicCycleLengthAfterBleedingLog({ isGhost: false, userId });

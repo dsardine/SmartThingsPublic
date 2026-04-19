@@ -18,13 +18,19 @@ TaskManager.defineTask(BACKGROUND_SCORE_TASK, async () => {
       return BackgroundFetch.BackgroundFetchResult.NoData;
     }
 
-    const { data: profile } = await supabase
+    const { data: profile, error: profileErr } = await supabase
       .from('profiles')
-      .select('has_new_biometrics')
+      .select('clinical_state, tracking_goal')
       .eq('id', session.user.id)
       .maybeSingle();
 
-    if (!profile?.has_new_biometrics) {
+    if (profileErr || !profile) {
+      return BackgroundFetch.BackgroundFetchResult.NoData;
+    }
+    if (profile.clinical_state != null && profile.clinical_state !== 'cycling') {
+      return BackgroundFetch.BackgroundFetchResult.NoData;
+    }
+    if (profile.tracking_goal === 'track_only') {
       return BackgroundFetch.BackgroundFetchResult.NoData;
     }
 

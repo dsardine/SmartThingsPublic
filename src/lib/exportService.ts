@@ -105,13 +105,15 @@ function buildRowsForRange(
     const iso = isoDateString(cursor);
     const b = bioBy.get(iso);
     const m = manBy.get(iso);
+    const recordedBbt =
+      m?.manual_bbt != null && String(m.manual_bbt).trim() !== '' ? Number(m.manual_bbt) : null;
     const mergedInput: DailyFertilityInput = {
       date: iso,
-      manual_bbt: m?.manual_bbt != null && m.exclude_temp !== true ? Number(m.manual_bbt) : null,
+      manual_bbt: recordedBbt != null && Number.isFinite(recordedBbt) ? recordedBbt : null,
       sleeping_temp: b?.sleeping_temp != null ? Number(b.sleeping_temp) : null,
       rhr: b?.rhr != null ? Number(b.rhr) : null,
+      exclude_temp: m?.exclude_temp === true,
     };
-    if (m?.exclude_temp === true) mergedInput.manual_bbt = null;
 
     const charted = effectiveChartedTemp(mergedInput);
     const ghostKey = `${GHOST_MANUAL_KEY_PREFIX}${iso}`;
@@ -127,7 +129,7 @@ function buildRowsForRange(
     rows.push([
       formatIsoDateForExport(iso, dateFormat),
       charted != null ? String(charted) : '',
-      mergedInput.manual_bbt != null ? String(mergedInput.manual_bbt) : '',
+      recordedBbt != null ? String(recordedBbt) : '',
       formatBbtTimeForExport(m?.bbt_time_taken, dateFormat),
       b?.sleeping_temp != null ? String(b.sleeping_temp) : '',
       b?.rhr != null ? String(b.rhr) : '',

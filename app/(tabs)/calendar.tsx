@@ -17,10 +17,7 @@ import { Picker } from '@react-native-picker/picker';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 
-import {
-  calculateDynamicCycleAverage,
-  estimatedOvulationFromProfileIntake,
-} from '@/src/lib/algorithms';
+import { estimatedOvulationFromProfileIntake } from '@/src/lib/algorithms';
 import { parseInsightText } from '@/src/lib/cachedInsight';
 import {
   addCalendarDays,
@@ -33,12 +30,16 @@ import {
   GHOST_MANUAL_KEY_PREFIX,
 } from '@/src/lib/manualGhostMerge';
 import { ghostStorage } from '@/src/lib/storage';
-import { persistDynamicCycleLengthAfterBleedingLog } from '@/src/lib/persistDynamicCycleLength';
+import {
+  maybeSetClinicalCycleAnchorAfterMenstrualCd1,
+  persistDynamicCycleLengthAfterBleedingLog,
+} from '@/src/lib/persistDynamicCycleLength';
 import { supabase } from '@/src/lib/supabase';
 import { useAppStore } from '@/src/store';
 import { colors } from '@/src/styles/theme';
 import type {
   BbtTimeFormat,
+  ClinicalState,
   ManualLogBleeding,
   ManualLogCervicalFirmness,
   ManualLogCervicalFluid,
@@ -143,7 +144,7 @@ function buildPredictedNextPeriodWindowSet(anchorCd1Iso: string, cycleLengthDays
 
 const OVULATION_MARKER = '\u{1F338}';
 const INTERCOURSE_OPTS: ManualLogIntercourse[] = ['Protected', 'Unprotected', 'Insemination'];
-const FLUID_OPTS: ManualLogCervicalFluid[] = ['Dry', 'Sticky', 'Creamy', 'Eggwhite'];
+const FLUID_OPTS: ManualLogCervicalFluid[] = ['Dry', 'Sticky', 'Creamy', 'Eggwhite', 'Watery'];
 const POS_OPTS: ManualLogCervicalPosition[] = ['High', 'Medium', 'Low'];
 const FIRM_OPTS: ManualLogCervicalFirmness[] = ['Soft', 'Firm'];
 const DIST_OPTS: ManualLogDisturbance[] = ['Fever', 'Alcohol', 'Poor Sleep', 'Travel'];
@@ -168,8 +169,39 @@ function listIsoDaysInclusive(fromIso: string, toIso: string): string[] {
 }
 
 /**
+ * First calendar day of the menstrual segment that ends on `endIso`, walking backward from the period-end
+ * day across unlogged gaps. Stops when more than `maxGapDays` consecutive days have no Light/Medium/Heavy
+ * (so a prior cycle does not get merged in).
+ */
+function findMenstrualSegmentStartAnchor(
+  byDate: Map<string, LogMarker>,
+  endIso: string,
+  maxGapDays: number,
+  maxSteps: number,
+): string | null {
+  let d = parseIsoDate(endIso);
+  if (Number.isNaN(d.getTime())) return null;
+  let earliestFlowIso: string | null = null;
+  let gapAfterLastFlow = 0;
+  for (let step = 0; step < maxSteps; step += 1) {
+    const iso = isoDateString(d);
+    const b = byDate.get(iso)?.bleeding ?? null;
+    if (isLoggedMenstrualFlow(b)) {
+      earliestFlowIso = iso;
+      gapAfterLastFlow = 0;
+    } else if (earliestFlowIso != null) {
+      gapAfterLastFlow += 1;
+      if (gapAfterLastFlow > maxGapDays) break;
+    }
+    d = addCalendarDays(d, -1);
+  }
+  return earliestFlowIso;
+}
+
+/**
  * Logged bleeding per ISO (markers) + inferred gap-fill.
- * - `period_end`: bridges from the nearest prior Light/Medium/Heavy day (Spotting ignored for anchor).
+ * - `period_end`: bridges from the **first** Light/Medium/Heavy day of this segment through the end day,
+ *   across modest unlogged gaps (same period). Spotting does not count as segment flow for the anchor walk.
  * - Intake-only: when there is no `period_end` anywhere but markers include onboarding LMP as flow,
  *   adds a short estimated menses tail (LMP+1 … LMP+4) on empty days so day-zero-only users still see inferred striping.
  * Inferred days skip any calendar day that already has bleeding logged (any intensity).
@@ -198,11 +230,7 @@ function computeBleedingVisualSets(
   const inferredFill = new Set<string>();
   for (const [e, m] of byDate) {
     if (!m.period_end) continue;
-    let anchor: string | null = null;
-    for (const [d, m2] of byDate) {
-      if (d > e || !isLoggedMenstrualFlow(m2.bleeding)) continue;
-      if (anchor == null || d > anchor) anchor = d;
-    }
+    const anchor = findMenstrualSegmentStartAnchor(byDate, e, 10, 50);
     if (anchor == null) continue;
     for (const d of listIsoDaysInclusive(anchor, e)) {
       if (!anyBleedDays.has(d)) inferredFill.add(d);
@@ -412,6 +440,7 @@ export default function CalendarScreen() {
   const bbtTimeFormat = useAppStore((s) => s.preferences.bbtTimeFormat);
   const temperatureUnit = useAppStore((s) => s.preferences.temperatureUnit);
   const isGhost = useAppStore((s) => s.isGhostModeEnabled);
+  const clinicalState = useAppStore((s) => s.clinicalState);
   const tempUnit: TempUnit = temperatureUnit === 'C' ? 'C' : 'F';
 
   const cell = useMemo(() => {
@@ -446,6 +475,12 @@ export default function CalendarScreen() {
   );
 
   const loadFertile = useCallback(async () => {
+    if (useAppStore.getState().clinicalState !== 'cycling') {
+      setFertileStart(null);
+      setFertileEnd(null);
+      setEstimatedOvulationIso(null);
+      return;
+    }
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -465,10 +500,28 @@ export default function CalendarScreen() {
         .maybeSingle(),
       supabase
         .from('profiles')
-        .select('last_period_date, cycle_length_avg, onboarding_completed')
+        .select(
+          'last_period_date, cycle_length_avg, onboarding_completed, clinical_state',
+        )
         .eq('id', user.id)
         .maybeSingle(),
     ]);
+
+    const pr = profileRow as {
+      last_period_date?: string | null;
+      cycle_length_avg?: number | null;
+      onboarding_completed?: boolean | null;
+      clinical_state?: string | null;
+    } | null;
+
+    const profileCs = (pr?.clinical_state as ClinicalState | null | undefined) ?? null;
+    const algorithmsActive = (profileCs ?? 'cycling') === 'cycling';
+    if (!algorithmsActive) {
+      setFertileStart(null);
+      setFertileEnd(null);
+      setEstimatedOvulationIso(null);
+      return;
+    }
 
     const ovFromInsight = insightRow?.insight_text
       ? parseInsightText(insightRow.insight_text).estimatedOvulationDate
@@ -481,12 +534,6 @@ export default function CalendarScreen() {
       setFertileEnd(isoDateString(addCalendarDays(o, 1)));
       return;
     }
-
-    const pr = profileRow as {
-      last_period_date?: string | null;
-      cycle_length_avg?: number | null;
-      onboarding_completed?: boolean | null;
-    } | null;
 
     if (pr?.onboarding_completed === true && typeof pr.last_period_date === 'string') {
       const cycleAvg = useAppStore.getState().cycleLengthAvg;
@@ -509,6 +556,10 @@ export default function CalendarScreen() {
   }, []);
 
   const refreshPredictedPeriodWindow = useCallback(async (intakeLmpForFallback: string | null) => {
+    if (clinicalState !== 'cycling') {
+      setPredictedPeriodWindow(new Set());
+      return;
+    }
     const cl = Math.round(Number(useAppStore.getState().cycleLengthAvg));
     if (!Number.isFinite(cl) || cl < 21 || cl > 50) {
       setPredictedPeriodWindow(new Set());
@@ -575,7 +626,7 @@ export default function CalendarScreen() {
       return;
     }
     setPredictedPeriodWindow(buildPredictedNextPeriodWindowSet(anchor, cl));
-  }, [isGhost]);
+  }, [isGhost, clinicalState]);
 
   const loadMonthBleedingMarkers = useCallback(async () => {
     const first = startOfMonth(monthCursor);
@@ -684,7 +735,18 @@ export default function CalendarScreen() {
 
   useEffect(() => {
     void refreshPredictedPeriodWindow(intakeLmpIso);
-  }, [cycleLengthAvg, intakeLmpIso, refreshPredictedPeriodWindow]);
+  }, [cycleLengthAvg, intakeLmpIso, refreshPredictedPeriodWindow, clinicalState]);
+
+  useEffect(() => {
+    if (clinicalState !== 'cycling') {
+      setFertileStart(null);
+      setFertileEnd(null);
+      setEstimatedOvulationIso(null);
+      setPredictedPeriodWindow(new Set());
+    } else {
+      void loadFertile();
+    }
+  }, [clinicalState, loadFertile]);
 
   useFocusEffect(
     useCallback(() => {
@@ -713,6 +775,13 @@ export default function CalendarScreen() {
       setForm((f) => ({ ...f, period_end: false }));
     }
   }, [sheetOpen, selectedIso, showPeriodEndToggle, form.period_end]);
+
+  /** Disturbances imply chart exclusion; user clears the switch manually if they want the temp on-chart. */
+  useEffect(() => {
+    if (!sheetOpen) return;
+    if (form.disturbances.length === 0) return;
+    setForm((f) => (f.exclude_temp ? f : { ...f, exclude_temp: true }));
+  }, [sheetOpen, form.disturbances]);
 
   const grid = useMemo(() => {
     const first = startOfMonth(monthCursor);
@@ -898,6 +967,11 @@ export default function CalendarScreen() {
         await supabase.from('manual_logs').insert(row);
       }
       void loadMonthBleedingMarkers();
+      await maybeSetClinicalCycleAnchorAfterMenstrualCd1({
+        userId: user.id,
+        logDateIso: selectedIso,
+        bleeding: form.bleeding,
+      });
       await persistDynamicCycleLengthAfterBleedingLog({ isGhost: false, userId: user.id });
       void loadFertile();
       setSheetOpen(false);
@@ -983,7 +1057,7 @@ export default function CalendarScreen() {
           )}
         </View>
 
-        <CalendarLegend />
+        <CalendarLegend algorithmsActive={clinicalState === 'cycling'} />
       </ScrollView>
 
       <Modal visible={sheetOpen} animationType="slide" transparent onRequestClose={() => setSheetOpen(false)}>
@@ -1233,19 +1307,23 @@ export default function CalendarScreen() {
   );
 }
 
-function CalendarLegend() {
+function CalendarLegend({ algorithmsActive }: { algorithmsActive: boolean }) {
   return (
     <View style={styles.legendWrap}>
       <Text style={styles.legendTitle}>Legend</Text>
       <View style={styles.legendGrid}>
-        <LegendItem
-          label="Fertile window"
-          swatch={<View style={styles.legendSwatchFertile} />}
-        />
-        <LegendItem
-          label="Estimated ovulation"
-          swatch={<Text style={styles.legendOvSwatch}>{OVULATION_MARKER}</Text>}
-        />
+        {algorithmsActive ? (
+          <>
+            <LegendItem
+              label="Fertile window"
+              swatch={<View style={styles.legendSwatchFertile} />}
+            />
+            <LegendItem
+              label="Estimated ovulation"
+              swatch={<Text style={styles.legendOvSwatch}>{OVULATION_MARKER}</Text>}
+            />
+          </>
+        ) : null}
         <LegendItem
           label="Menstrual flow (heavy → light)"
           swatch={
@@ -1261,10 +1339,12 @@ function CalendarLegend() {
           label="Inferred period"
           swatch={<View style={styles.legendInferredSwatch} />}
         />
-        <LegendItem
-          label="Predicted period"
-          swatch={<View style={styles.legendPredictedSwatch} />}
-        />
+        {algorithmsActive ? (
+          <LegendItem
+            label="Predicted period"
+            swatch={<View style={styles.legendPredictedSwatch} />}
+          />
+        ) : null}
       </View>
     </View>
   );

@@ -16,9 +16,11 @@ import { type Href, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { formatCalendarDate, isoDateString, parseIsoDate } from '@/src/lib/dateDisplay';
+import { WHY_HERE_OPTIONS } from '@/src/lib/userCyclePreferencesCopy';
 import { supabase } from '@/src/lib/supabase';
 import { useAppStore } from '@/src/store';
 import { colors } from '@/src/styles/theme';
+import type { TrackingGoal } from '@/src/types/database';
 
 function defaultLmpDate(): Date {
   const d = new Date();
@@ -32,6 +34,7 @@ export default function OnboardingScreen() {
   const dateFormat = useAppStore((s) => s.preferences.dateFormat);
   const [lastPeriod, setLastPeriod] = useState(defaultLmpDate);
   const [cycleLen, setCycleLen] = useState('28');
+  const [whyHere, setWhyHere] = useState<TrackingGoal>('track_only');
   const [busy, setBusy] = useState(false);
   const [showPicker, setShowPicker] = useState(Platform.OS === 'ios');
 
@@ -66,6 +69,7 @@ export default function OnboardingScreen() {
           id: user.id,
           last_period_date: lastIso,
           cycle_length_avg: cl,
+          tracking_goal: whyHere,
           onboarding_completed: true,
         },
         { onConflict: 'id' },
@@ -75,6 +79,7 @@ export default function OnboardingScreen() {
         Alert.alert('Could not save', error.message);
         return;
       }
+      useAppStore.getState().setTrackingGoal(whyHere);
       router.replace('/' as Href);
     } finally {
       setBusy(false);
@@ -157,6 +162,34 @@ export default function OnboardingScreen() {
               placeholder="28"
               placeholderTextColor={colors.textMuted}
             />
+          </View>
+
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>What brings you here?</Text>
+            <Text style={styles.cardHint}>
+              This only changes reminders and how we talk about your chart — you can change it anytime in
+              Preferences.
+            </Text>
+            <View style={styles.goalList}>
+              {WHY_HERE_OPTIONS.map((opt) => {
+                const on = opt.value === whyHere;
+                return (
+                  <Pressable
+                    key={opt.value}
+                    onPress={() => setWhyHere(opt.value)}
+                    style={[styles.goalRow, on && styles.goalRowOn]}
+                    accessibilityRole="radio"
+                    accessibilityState={{ selected: on }}
+                    accessibilityLabel={opt.title}>
+                    <View style={[styles.goalDot, on && styles.goalDotOn]} />
+                    <View style={styles.goalTextCol}>
+                      <Text style={[styles.goalTitle, on && styles.goalTitleOn]}>{opt.title}</Text>
+                      <Text style={styles.goalSubtitle}>{opt.subtitle}</Text>
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </View>
           </View>
 
           <Pressable
@@ -261,4 +294,41 @@ const styles = StyleSheet.create({
   },
   ctaDisabled: { opacity: 0.65 },
   ctaTxt: { color: colors.card, fontWeight: '900', fontSize: 17 },
+  goalList: { gap: 10 },
+  goalRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.chartGrid,
+    backgroundColor: colors.background,
+  },
+  goalRowOn: {
+    borderColor: colors.primarySageGreen,
+    backgroundColor: colors.fertileTint,
+  },
+  goalDot: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 2,
+    borderColor: colors.chartGrid,
+    marginTop: 2,
+  },
+  goalDotOn: {
+    borderColor: colors.primarySageGreen,
+    backgroundColor: colors.primarySageGreen,
+  },
+  goalTextCol: { flex: 1 },
+  goalTitle: { fontSize: 16, fontWeight: '800', color: colors.textDark },
+  goalTitleOn: { color: colors.primarySageGreen },
+  goalSubtitle: {
+    marginTop: 4,
+    fontSize: 13,
+    color: colors.textMuted,
+    lineHeight: 18,
+  },
 });
