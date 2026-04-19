@@ -330,12 +330,25 @@ export default function FertilityDashboardScreen() {
         let detail = fnError.message;
         if (fnError instanceof FunctionsHttpError) {
           try {
-            const body = (await fnError.context.json()) as { error?: string };
-            if (typeof body?.error === 'string' && body.error.trim() !== '') {
-              detail = body.error;
+            const raw = await fnError.context.clone().text();
+            if (raw) {
+              try {
+                const j = JSON.parse(raw) as {
+                  error?: string;
+                  message?: string;
+                  details?: string;
+                  hint?: string;
+                };
+                const parts = [j.message, j.details, j.hint, j.error].filter(
+                  (s): s is string => typeof s === 'string' && s.trim() !== '',
+                );
+                detail = parts.length > 0 ? parts.join('\n') : raw;
+              } catch {
+                detail = raw.length > 420 ? `${raw.slice(0, 420)}…` : raw;
+              }
             }
           } catch {
-            /* keep generic message */
+            /* keep fnError.message */
           }
         }
         Alert.alert('Score', detail);

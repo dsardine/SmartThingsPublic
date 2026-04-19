@@ -406,6 +406,7 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  try {
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -506,7 +507,7 @@ Deno.serve(async (req: Request) => {
     );
     const unified = rulesResultToUnified(paused);
 
-    const { error: insertPaused } = await admin.from("cached_insight").insert({
+    const { error: insertPaused } = await supabase.from("cached_insight").insert({
       user_id: user.id,
       conception_score: unified.fertility_score,
       is_estimate: unified.is_estimate,
@@ -514,12 +515,21 @@ Deno.serve(async (req: Request) => {
     });
     if (insertPaused) {
       console.error("cached_insight insert (paused):", insertPaused);
-      return new Response(JSON.stringify({ error: "Failed to save insight" }), {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({
+          error: "Failed to save insight",
+          message: insertPaused.message,
+          code: insertPaused.code,
+          details: insertPaused.details,
+          hint: insertPaused.hint,
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
     }
-    const { error: profilePausedErr } = await admin
+    const { error: profilePausedErr } = await supabase
       .from("profiles")
       .update({ has_new_biometrics: false })
       .eq("id", user.id);
@@ -713,7 +723,7 @@ ${jsonFooter}`) + statGemSuffix;
 
   unified = applyStatisticalDetectiveAdjustments(unified, periodOnly);
 
-  const { error: insertError } = await admin.from("cached_insight").insert({
+  const { error: insertError } = await supabase.from("cached_insight").insert({
     user_id: user.id,
     conception_score: unified.fertility_score,
     is_estimate: unified.is_estimate,
@@ -722,13 +732,22 @@ ${jsonFooter}`) + statGemSuffix;
 
   if (insertError) {
     console.error("cached_insight insert:", insertError);
-    return new Response(JSON.stringify({ error: "Failed to save insight" }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({
+        error: "Failed to save insight",
+        message: insertError.message,
+        code: insertError.code,
+        details: insertError.details,
+        hint: insertError.hint,
+      }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    );
   }
 
-  const { error: profileError } = await admin
+  const { error: profileError } = await supabase
     .from("profiles")
     .update({ has_new_biometrics: false })
     .eq("id", user.id);
@@ -743,4 +762,18 @@ ${jsonFooter}`) + statGemSuffix;
   return new Response(JSON.stringify({ ok: true, ...unified }), {
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("generate-score fatal:", e);
+    return new Response(
+      JSON.stringify({
+        error: "generate_score_failed",
+        message: msg,
+      }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    );
+  }
 });
