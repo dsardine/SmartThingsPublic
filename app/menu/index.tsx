@@ -23,18 +23,21 @@ import {
 } from '@/src/lib/exportService';
 import {
   getHealthConnectMenuSummary,
+  healthConnectHasAllReadPermissions,
   healthConnectOpenSettings,
   healthConnectRequestReadPermissions,
+  healthConnectSyncMenstruationAndBbtToManualLogs,
 } from '@/src/lib/healthConnectAndroid';
 import {
   getHealthKitMenuSummary,
+  healthKitHasAllReadPermissions,
   healthKitOpenHealthApp,
   healthKitRequestReadPermissions,
 } from '@/src/lib/healthKitIOS';
 import { supabase } from '@/src/lib/supabase';
 import { useAppStore } from '@/src/store';
 import { colors } from '@/src/styles/theme';
-import type { DateFormat, FirstDayOfWeek, TemperatureUnit } from '@/src/types/database';
+import type { BbtTimeFormat, DateFormat, FirstDayOfWeek, TemperatureUnit } from '@/src/types/database';
 
 export default function MenuScreen() {
   const router = useRouter();
@@ -49,19 +52,38 @@ export default function MenuScreen() {
   const [signOutBusy, setSignOutBusy] = useState(false);
   const [wearableSummary, setWearableSummary] = useState<string | null>(null);
   const [wearableBusy, setWearableBusy] = useState(false);
+  /** When true, all Sardine read permissions are granted — hide "Allow access". */
+  const [wearablePermissionsComplete, setWearablePermissionsComplete] = useState<boolean | null>(null);
+  const [hcImportModalOpen, setHcImportModalOpen] = useState(false);
+  /** `null` = import all history Health Connect allows (passes `null` as lookback). */
+  const [hcLookbackChoice, setHcLookbackChoice] = useState<60 | 180 | null>(60);
+  const [hcImportBusy, setHcImportBusy] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
       let alive = true;
       void (async () => {
         if (Platform.OS === 'android') {
-          const summary = await getHealthConnectMenuSummary();
-          if (alive) setWearableSummary(summary);
+          const [summary, granted] = await Promise.all([
+            getHealthConnectMenuSummary(),
+            healthConnectHasAllReadPermissions(),
+          ]);
+          if (alive) {
+            setWearableSummary(summary);
+            setWearablePermissionsComplete(granted);
+          }
         } else if (Platform.OS === 'ios') {
-          const summary = await getHealthKitMenuSummary();
-          if (alive) setWearableSummary(summary);
+          const [summary, granted] = await Promise.all([
+            getHealthKitMenuSummary(),
+            healthKitHasAllReadPermissions(),
+          ]);
+          if (alive) {
+            setWearableSummary(summary);
+            setWearablePermissionsComplete(granted);
+          }
         } else if (alive) {
           setWearableSummary(null);
+          setWearablePermissionsComplete(null);
         }
       })();
       return () => {
@@ -75,6 +97,7 @@ export default function MenuScreen() {
       temperature_unit?: TemperatureUnit;
       first_day_of_week?: FirstDayOfWeek;
       date_format?: DateFormat;
+      bbt_time_format?: BbtTimeFormat;
     }) => {
       if (!session?.user?.id) return;
       setBusy(true);
@@ -104,6 +127,11 @@ export default function MenuScreen() {
   const setFmt = (f: DateFormat) => {
     setPreferences({ dateFormat: f });
     void persistProfile({ date_format: f });
+  };
+
+  const setBbtTimeFmt = (tf: BbtTimeFormat) => {
+    setPreferences({ bbtTimeFormat: tf });
+    void persistProfile({ bbt_time_format: tf });
   };
 
   const sharePdf = async () => {
@@ -154,6 +182,37 @@ export default function MenuScreen() {
     }
   };
 
+  const runHealthConnectImport = async () => {
+    if (Platform.OS !== 'android') return;
+    if (!session?.user?.id && !isGhost) {
+      Alert.alert('Sign in required', 'Sign in to import Health Connect data into your cloud manual log.');
+      return;
+    }
+    setHcImportBusy(true);
+    try {
+      const lookbackDays = hcLookbackChoice === null ? null : hcLookbackChoice;
+      const result = await healthConnectSyncMenstruationAndBbtToManualLogs({
+        lookbackDays,
+        temperatureUnit: prefs.temperatureUnit,
+        isGhostMode: isGhost,
+        userId: session?.user?.id ?? null,
+      });
+      if (!result.ok) {
+        Alert.alert('Health Connect import', result.reason);
+        return;
+      }
+      setHcImportModalOpen(false);
+      Alert.alert(
+        'Import complete',
+        result.daysTouched === 0
+          ? 'No new BBT or period flow records were found in that range.'
+          : `Updated ${result.daysTouched} calendar day(s). Your cycle estimate was refreshed from bleeding history.`,
+      );
+    } finally {
+      setHcImportBusy(false);
+    }
+  };
+
   const onWearableAllow = async () => {
     setWearableBusy(true);
     try {
@@ -164,6 +223,7 @@ export default function MenuScreen() {
           return;
         }
         setWearableSummary(await getHealthConnectMenuSummary());
+        setWearablePermissionsComplete(await healthConnectHasAllReadPermissions());
       } else if (Platform.OS === 'ios') {
         const result = await healthKitRequestReadPermissions();
         if (!result.ok) {
@@ -171,6 +231,7 @@ export default function MenuScreen() {
           return;
         }
         setWearableSummary(await getHealthKitMenuSummary());
+        setWearablePermissionsComplete(await healthKitHasAllReadPermissions());
       }
     } finally {
       setWearableBusy(false);
@@ -204,22 +265,24 @@ export default function MenuScreen() {
           <Text style={styles.cardBody}>
             {wearableSummary ??
               (Platform.OS === 'android'
-                ? 'Checking Health Connect… Sardine reads resting heart rate, HRV, respiratory rate, and basal body temperature when you allow it.'
+                ? 'Checking Health Connect… Sardine reads resting heart rate, HRV, respiratory rate, basal body temperature, and period flow when you allow it.'
                 : 'Checking Apple Health… Sardine reads basal temperature, HRV (SDNN), resting heart rate, and respiratory rate when you allow it.')}
           </Text>
           {wearableBusy ? (
             <ActivityIndicator style={{ marginVertical: 10 }} color={colors.primarySageGreen} />
           ) : (
             <View style={styles.exportRow}>
-              <Pressable
-                style={styles.exportBtn}
-                onPress={() => void onWearableAllow()}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  Platform.OS === 'android' ? 'Allow Health Connect read access' : 'Allow Apple Health read access'
-                }>
-                <Text style={styles.exportBtnTxt}>Allow access</Text>
-              </Pressable>
+              {wearablePermissionsComplete === false ? (
+                <Pressable
+                  style={styles.exportBtn}
+                  onPress={() => void onWearableAllow()}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    Platform.OS === 'android' ? 'Allow Health Connect read access' : 'Allow Apple Health read access'
+                  }>
+                  <Text style={styles.exportBtnTxt}>Allow access</Text>
+                </Pressable>
+              ) : null}
               <Pressable
                 style={styles.secondaryOutlineBtn}
                 onPress={() => {
@@ -237,6 +300,19 @@ export default function MenuScreen() {
                   {Platform.OS === 'android' ? 'Health Connect settings' : 'Open Health app'}
                 </Text>
               </Pressable>
+              {Platform.OS === 'android' && wearablePermissionsComplete ? (
+                <Pressable
+                  style={styles.secondaryOutlineBtn}
+                  onPress={() => {
+                    setHcLookbackChoice(60);
+                    setHcImportModalOpen(true);
+                  }}
+                  disabled={hcImportBusy}
+                  accessibilityRole="button"
+                  accessibilityLabel="Import period flow and BBT from Health Connect">
+                  <Text style={styles.secondaryOutlineBtnTxt}>Import from Health Connect</Text>
+                </Pressable>
+              ) : null}
             </View>
           )}
         </View>
@@ -305,6 +381,27 @@ export default function MenuScreen() {
       </View>
 
       <View style={styles.card}>
+        <Text style={styles.cardTitle}>BBT time taken</Text>
+        <Text style={styles.cardBody}>
+          How the calendar shows the time you logged for manual BBT. Values are always stored as 24-hour
+          (HH:MM).
+        </Text>
+        <View style={styles.segment}>
+          {(['12h', '24h'] as const).map((tf) => (
+            <Pressable
+              key={tf}
+              onPress={() => setBbtTimeFmt(tf)}
+              style={[styles.segBtn, prefs.bbtTimeFormat === tf && styles.segBtnOn]}
+              disabled={busy}>
+              <Text style={[styles.segTxt, prefs.bbtTimeFormat === tf && styles.segTxtOn]}>
+                {tf === '12h' ? '12-hour' : '24-hour'}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
+
+      <View style={styles.card}>
         <Text style={styles.cardTitle}>Clinical export</Text>
         <Text style={styles.cardBody}>
           PDF and CSV use your date format preference and merge cloud data with Ghost Mode (MMKV) so the
@@ -356,6 +453,63 @@ export default function MenuScreen() {
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setPaywallOpen(false)} />
           <View style={styles.modalCard}>
             <PremiumPaywall onClose={() => setPaywallOpen(false)} />
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={hcImportModalOpen}
+        animationType="fade"
+        transparent
+        onRequestClose={() => !hcImportBusy && setHcImportModalOpen(false)}>
+        <View style={styles.modalRoot}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => !hcImportBusy && setHcImportModalOpen(false)} />
+          <View style={styles.hcImportCard}>
+            <Text style={styles.hcImportTitle}>How much past data should we import?</Text>
+            <Text style={styles.hcImportBody}>
+              More history usually improves predictions right away. Sardine only fills empty BBT and bleeding fields
+              on each day so your manual entries always win. You stay in full control of what is imported.
+            </Text>
+            <View style={styles.hcRadioList}>
+              {(
+                [
+                  { value: 60 as const, label: 'Last 60 days' },
+                  { value: 180 as const, label: 'Last 6 months' },
+                  { value: null, label: 'All available history' },
+                ] as const
+              ).map((opt) => (
+                <Pressable
+                  key={String(opt.value)}
+                  style={[styles.hcRadioRow, hcLookbackChoice === opt.value && styles.hcRadioRowOn]}
+                  onPress={() => setHcLookbackChoice(opt.value)}
+                  disabled={hcImportBusy}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: hcLookbackChoice === opt.value }}>
+                  <View style={[styles.hcRadioDot, hcLookbackChoice === opt.value && styles.hcRadioDotOn]} />
+                  <Text style={styles.hcRadioLabel}>{opt.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+            {hcImportBusy ? (
+              <ActivityIndicator style={{ marginVertical: 14 }} color={colors.primarySageGreen} />
+            ) : (
+              <View style={styles.hcImportActions}>
+                <Pressable
+                  style={styles.secondaryOutlineBtn}
+                  onPress={() => setHcImportModalOpen(false)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel Health Connect import">
+                  <Text style={styles.secondaryOutlineBtnTxt}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  style={styles.exportBtn}
+                  onPress={() => void runHealthConnectImport()}
+                  accessibilityRole="button"
+                  accessibilityLabel="Start Health Connect import">
+                  <Text style={styles.exportBtnTxt}>Import</Text>
+                </Pressable>
+              </View>
+            )}
           </View>
         </View>
       </Modal>
@@ -438,4 +592,36 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   secondaryOutlineBtnTxt: { color: colors.primarySageGreen, fontWeight: '800', fontSize: 15 },
+  hcImportCard: {
+    backgroundColor: colors.card,
+    borderRadius: 16,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: colors.chartGrid,
+  },
+  hcImportTitle: { fontSize: 18, fontWeight: '800', color: colors.textDark, marginBottom: 8 },
+  hcImportBody: { fontSize: 14, color: colors.textMuted, lineHeight: 21, marginBottom: 14 },
+  hcRadioList: { gap: 10, marginBottom: 8 },
+  hcRadioRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.chartGrid,
+    backgroundColor: colors.background,
+  },
+  hcRadioRowOn: { borderColor: colors.primarySageGreen, backgroundColor: colors.card },
+  hcRadioDot: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 2,
+    borderColor: colors.chartGrid,
+  },
+  hcRadioDotOn: { borderColor: colors.primarySageGreen, backgroundColor: colors.primarySageGreen },
+  hcRadioLabel: { flex: 1, fontSize: 15, fontWeight: '600', color: colors.textDark },
+  hcImportActions: { flexDirection: 'row', gap: 10, marginTop: 8 },
 });

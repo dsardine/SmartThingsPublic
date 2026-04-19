@@ -1,6 +1,7 @@
 import type { MMKV } from 'react-native-mmkv';
 
-import type { DailyFertilityInput } from '@/src/lib/algorithms';
+import type { DailyFertilityInput, ManualLogs } from '@/src/lib/algorithms';
+import type { ManualLogBleeding } from '@/src/types/database';
 
 /** Must match calendar ghost keys: `ghost:manual:{YYYY-MM-DD}`. */
 export const GHOST_MANUAL_KEY_PREFIX = 'ghost:manual:';
@@ -80,6 +81,29 @@ export function mergeManualLogsWithGhostStorage(
     String(a.date).localeCompare(String(b.date)),
   );
   return { mergedRows, ghostDates };
+}
+
+/** Ascending `ManualLogs` from Ghost Mode keys for dynamic cycle-length math. */
+export function collectGhostManualLogsForCycleAverage(ghostStorage: MMKV): ManualLogs[] {
+  const out: ManualLogs[] = [];
+  for (const key of ghostStorage.getAllKeys()) {
+    if (!key.startsWith(GHOST_MANUAL_KEY_PREFIX)) continue;
+    const iso = key.slice(GHOST_MANUAL_KEY_PREFIX.length);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) continue;
+    const raw = ghostStorage.getString(key);
+    if (!raw) continue;
+    try {
+      const o = JSON.parse(raw) as Record<string, unknown>;
+      out.push({
+        date: iso,
+        bleeding: (o.bleeding as ManualLogBleeding) ?? null,
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+  out.sort((a, b) => a.date.localeCompare(b.date));
+  return out;
 }
 
 /** Builds ascending `DailyFertilityInput[]` for `getAlgorithmicCoverlineY` / fertile window math. */

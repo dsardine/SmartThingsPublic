@@ -21,6 +21,8 @@ export default function TabLayout() {
   const authHydrated = useAppStore((s) => s.authHydrated);
   const session = useAppStore((s) => s.session);
   const hydratePreferences = useAppStore((s) => s.hydratePreferences);
+  const hydrateCycleLengthFromProfile = useAppStore((s) => s.hydrateCycleLengthFromProfile);
+  const isGhostModeEnabled = useAppStore((s) => s.isGhostModeEnabled);
   const [profileResolved, setProfileResolved] = useState(false);
   const [allowTabs, setAllowTabs] = useState(false);
 
@@ -39,7 +41,7 @@ export default function TabLayout() {
       const { data, error } = await supabase
         .from('profiles')
         .select(
-          'temperature_unit, first_day_of_week, date_format, onboarding_completed, last_period_date, cycle_length_avg',
+          'temperature_unit, first_day_of_week, date_format, bbt_time_format, onboarding_completed, last_period_date, cycle_length_avg',
         )
         .eq('id', session.user.id)
         .maybeSingle();
@@ -66,13 +68,25 @@ export default function TabLayout() {
         temperature_unit?: TemperatureUnit;
         first_day_of_week?: FirstDayOfWeek;
         date_format?: DateFormat;
+        bbt_time_format?: string | null;
         onboarding_completed?: boolean;
+        cycle_length_avg?: number | null;
       };
 
       hydratePreferences({
         temperatureUnit: row.temperature_unit === 'C' ? 'C' : 'F',
         firstDayOfWeek: row.first_day_of_week === 'Monday' ? 'Monday' : 'Sunday',
         dateFormat: row.date_format === 'DD/MM/YYYY' ? 'DD/MM/YYYY' : 'MM/DD/YYYY',
+        bbtTimeFormat: row.bbt_time_format === '24h' ? '24h' : '12h',
+      });
+
+      const serverCl =
+        typeof row.cycle_length_avg === 'number' && Number.isFinite(row.cycle_length_avg)
+          ? Math.round(row.cycle_length_avg)
+          : 28;
+      hydrateCycleLengthFromProfile({
+        serverCycleLengthAvg: serverCl,
+        isGhostMode: isGhostModeEnabled,
       });
 
       if (row.onboarding_completed !== true) {
@@ -89,7 +103,7 @@ export default function TabLayout() {
     return () => {
       cancelled = true;
     };
-  }, [session?.user?.id, hydratePreferences, router]);
+  }, [session?.user?.id, hydratePreferences, hydrateCycleLengthFromProfile, isGhostModeEnabled, router]);
 
   if (!authHydrated) {
     return (

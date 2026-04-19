@@ -4,6 +4,7 @@
  */
 
 import { addCalendarDays, isoDateString, parseIsoDate } from '@/src/lib/dateDisplay';
+import type { ManualLogBleeding } from '@/src/types/database';
 
 export type TemperatureUnitForAlgo = 'F' | 'C';
 
@@ -31,6 +32,78 @@ export type ProfileCycleIntake = {
   last_period_date: string;
   cycle_length_avg: number;
 };
+
+/** One row per calendar day for cycle-length math (duplicate dates: last row wins after chronological sort). */
+export type ManualLogs = {
+  date: string;
+  bleeding: ManualLogBleeding | null;
+};
+
+function mergeManualLogsByDateChronological(manualLogs: ManualLogs[]): ManualLogs[] {
+  const sorted = [...manualLogs].sort((a, b) => a.date.localeCompare(b.date));
+  const byDate = new Map<string, ManualLogs>();
+  for (const row of sorted) {
+    byDate.set(row.date, row);
+  }
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function calendarDayBefore(iso: string): string {
+  return isoDateString(addCalendarDays(parseIsoDate(iso), -1));
+}
+
+/** Calendar days from first CD1 (inclusive) to the next CD1 (exclusive): e.g. Jan 1 → Jan 29 = 28. */
+function calendarDaysBetweenCd1(fromIso: string, toIso: string): number {
+  if (fromIso >= toIso) return 0;
+  let n = 0;
+  let d = parseIsoDate(fromIso);
+  while (isoDateString(d) < toIso) {
+    n += 1;
+    d = addCalendarDays(d, 1);
+  }
+  return n;
+}
+
+function isFlowBleedingForCd1(b: ManualLogBleeding | null): boolean {
+  return b === 'Light' || b === 'Medium' || b === 'Heavy';
+}
+
+/**
+ * Sprint 7 — rolling cycle length from logged bleeding.
+ * CD1: Light/Medium/Heavy when the prior calendar day is not Light/Medium/Heavy (Spotting/null count as non-flow).
+ * Fewer than two valid lengths (21–45d) after outlier exclusion → `fallbackAverage` (onboarding seed).
+ */
+export function calculateDynamicCycleAverage(manualLogs: ManualLogs[], fallbackAverage: number): number {
+  const fb = Math.round(Number(fallbackAverage));
+  const safeFallback = Number.isFinite(fb) ? fb : 28;
+
+  const series = mergeManualLogsByDateChronological(manualLogs);
+  const byDate = new Map<string, ManualLogBleeding | null>();
+  for (const row of series) {
+    byDate.set(row.date, row.bleeding);
+  }
+
+  const cd1Dates: string[] = [];
+  for (const row of series) {
+    if (!isFlowBleedingForCd1(row.bleeding)) continue;
+    const prev = calendarDayBefore(row.date);
+    const prevBleed = byDate.get(prev) ?? null;
+    if (isFlowBleedingForCd1(prevBleed)) continue;
+    cd1Dates.push(row.date);
+  }
+
+  const rawLengths: number[] = [];
+  for (let i = 0; i < cd1Dates.length - 1; i += 1) {
+    rawLengths.push(calendarDaysBetweenCd1(cd1Dates[i]!, cd1Dates[i + 1]!));
+  }
+
+  const validLengths = rawLengths.filter((len) => len >= 21 && len <= 45);
+  if (validLengths.length < 2) return safeFallback;
+
+  const recent = validLengths.slice(-6);
+  const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
+  return Math.round(mean);
+}
 
 /** Data priority: `manual_bbt` first, else `sleeping_temp`. */
 export function effectiveChartedTemp(row: DailyFertilityInput): number | null {

@@ -26,6 +26,72 @@ export type ProfileCycleIntake = {
   cycle_length_avg: number;
 };
 
+/** One row per calendar day for cycle-length math (duplicate dates: last row wins). SYNC with app `ManualLogs`. */
+export type ManualLogs = {
+  date: string;
+  bleeding: string | null;
+};
+
+function mergeManualLogsByDateChronological(manualLogs: ManualLogs[]): ManualLogs[] {
+  const sorted = [...manualLogs].sort((a, b) => a.date.localeCompare(b.date));
+  const byDate = new Map<string, ManualLogs>();
+  for (const row of sorted) {
+    byDate.set(row.date, row);
+  }
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function calendarDaysBetweenCd1Iso(fromIso: string, toIso: string): number {
+  if (fromIso >= toIso) return 0;
+  let n = 0;
+  let cur = fromIso;
+  while (cur < toIso) {
+    n += 1;
+    cur = addCalendarDaysIso(cur, 1);
+  }
+  return n;
+}
+
+function isFlowBleedingForCd1(b: string | null): boolean {
+  return b === "Light" || b === "Medium" || b === "Heavy";
+}
+
+/**
+ * Rolling cycle length from logged bleeding.
+ * CD1: Light/Medium/Heavy when prior day is not Light/Medium/Heavy (Spotting/null = non-flow). SYNC with app.
+ */
+export function calculateDynamicCycleAverage(manualLogs: ManualLogs[], fallbackAverage: number): number {
+  const fb = Math.round(Number(fallbackAverage));
+  const safeFallback = Number.isFinite(fb) ? fb : 28;
+
+  const series = mergeManualLogsByDateChronological(manualLogs);
+  const byDate = new Map<string, string | null>();
+  for (const row of series) {
+    byDate.set(row.date, row.bleeding);
+  }
+
+  const cd1Dates: string[] = [];
+  for (const row of series) {
+    if (!isFlowBleedingForCd1(row.bleeding)) continue;
+    const prev = addCalendarDaysIso(row.date, -1);
+    const prevBleed = byDate.get(prev) ?? null;
+    if (isFlowBleedingForCd1(prevBleed)) continue;
+    cd1Dates.push(row.date);
+  }
+
+  const rawLengths: number[] = [];
+  for (let i = 0; i < cd1Dates.length - 1; i += 1) {
+    rawLengths.push(calendarDaysBetweenCd1Iso(cd1Dates[i]!, cd1Dates[i + 1]!));
+  }
+
+  const validLengths = rawLengths.filter((len) => len >= 21 && len <= 45);
+  if (validLengths.length < 2) return safeFallback;
+
+  const recent = validLengths.slice(-6);
+  const mean = recent.reduce((a, b) => a + b, 0) / recent.length;
+  return Math.round(mean);
+}
+
 function addCalendarDaysIso(iso: string, days: number): string {
   const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return iso;

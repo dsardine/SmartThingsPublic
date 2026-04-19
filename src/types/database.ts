@@ -14,6 +14,9 @@ export type FirstDayOfWeek = 'Sunday' | 'Monday';
 
 export type DateFormat = 'MM/DD/YYYY' | 'DD/MM/YYYY';
 
+/** How manual BBT "time taken" is shown; storage remains `HH:MM` 24-hour. */
+export type BbtTimeFormat = '12h' | '24h';
+
 export type ManualLogBleeding = 'Spotting' | 'Light' | 'Medium' | 'Heavy';
 
 export type ManualLogIntercourse = 'Protected' | 'Unprotected' | 'Insemination';
@@ -37,6 +40,8 @@ export type ProfilesRow = {
   first_day_of_week: FirstDayOfWeek;
   /** Default in DB: `'MM/DD/YYYY'`. */
   date_format: DateFormat;
+  /** Default in DB: `'12h'`. */
+  bbt_time_format: BbtTimeFormat;
   /** Drives cached vs fresh score generation (existing pipeline). */
   has_new_biometrics: boolean | null;
   /** First day of last period (LMP) from Day-zero intake; ISO `YYYY-MM-DD`. */
@@ -54,6 +59,7 @@ export type ProfilesInsert = {
   temperature_unit?: TemperatureUnit;
   first_day_of_week?: FirstDayOfWeek;
   date_format?: DateFormat;
+  bbt_time_format?: BbtTimeFormat;
   has_new_biometrics?: boolean | null;
   last_period_date?: string | null;
   cycle_length_avg?: number;
@@ -96,6 +102,8 @@ export type ManualLogsRow = {
   disturbances: ManualLogDisturbance[] | null;
   symptoms: string[] | null;
   test_results: string[] | null;
+  /** When true, calendar shows bleeding stripe from last logged bleeding day through this date. */
+  period_end: boolean;
 } & Record<string, unknown>;
 
 export type ManualLogsInsert = Omit<ManualLogsRow, 'id'> & { id?: string };
