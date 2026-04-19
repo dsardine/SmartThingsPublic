@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -10,9 +11,21 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import type { RealtimeChannel } from '@supabase/supabase-js';
+import { type Href, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { formatDaysToOvulation, parseInsightText } from '@/src/lib/cachedInsight';
+import {
+  HEALTH_CONNECT_SOFT_NUDGE_DISMISSED_KEY,
+  healthConnectEnsureInitialized,
+  healthConnectHasAllReadPermissions,
+} from '@/src/lib/healthConnectAndroid';
+import {
+  HEALTH_KIT_SOFT_NUDGE_DISMISSED_KEY,
+  healthKitEnsureAvailable,
+  healthKitHasAllReadPermissions,
+} from '@/src/lib/healthKitIOS';
+import { appStorage } from '@/src/lib/storage';
 import { MAX_BASELINE_ROWS } from '@/src/lib/nocturnalBiometrics';
 import { supabase } from '@/src/lib/supabase';
 import { colors } from '@/src/styles/theme';
@@ -61,6 +74,7 @@ function waitForChannelSubscribed(channel: RealtimeChannel): Promise<void> {
 }
 
 export default function FertilityDashboardScreen() {
+  const router = useRouter();
   const { width } = useWindowDimensions();
   const [loading, setLoading] = useState(false);
   const [score, setScore] = useState<ScoreResult | null>(null);
@@ -76,6 +90,54 @@ export default function FertilityDashboardScreen() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android' && Platform.OS !== 'ios') return;
+    const dismissKey =
+      Platform.OS === 'ios' ? HEALTH_KIT_SOFT_NUDGE_DISMISSED_KEY : HEALTH_CONNECT_SOFT_NUDGE_DISMISSED_KEY;
+    if (appStorage.getBoolean(dismissKey)) return;
+    let cancelled = false;
+    void (async () => {
+      if (Platform.OS === 'android') {
+        const init = await healthConnectEnsureInitialized();
+        if (cancelled || !init.ok) return;
+        const has = await healthConnectHasAllReadPermissions();
+        if (cancelled || has) return;
+        Alert.alert(
+          'Connect Google Health Connect',
+          'Allow read access so Sardine can use resting heart rate, HRV, breathing rate, and basal temperature from your wearables. You can also connect any time from the menu.',
+          [
+            {
+              text: 'Not now',
+              style: 'cancel',
+              onPress: () => appStorage.set(dismissKey, true),
+            },
+            { text: 'Open menu', onPress: () => router.push('/menu' as Href) },
+          ],
+        );
+        return;
+      }
+      const init = await healthKitEnsureAvailable();
+      if (cancelled || !init.ok) return;
+      const has = await healthKitHasAllReadPermissions();
+      if (cancelled || has) return;
+      Alert.alert(
+        'Connect Apple Health',
+        'Allow read access so Sardine can use basal temperature, HRV, resting heart rate, and respiratory rate from Apple Health. You can also connect any time from the menu.',
+        [
+          {
+            text: 'Not now',
+            style: 'cancel',
+            onPress: () => appStorage.set(dismissKey, true),
+          },
+          { text: 'Open menu', onPress: () => router.push('/menu' as Href) },
+        ],
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   const loadCachedScore = useCallback(async () => {
     const {

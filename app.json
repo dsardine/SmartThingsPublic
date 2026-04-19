@@ -14,7 +14,10 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "LSApplicationQueriesSchemes": ["x-apple-health"]
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -63,13 +66,25 @@
       "expo-background-fetch",
       "expo-local-authentication",
       [
+        "@kingstinct/react-native-healthkit",
+        {
+          "NSHealthShareUsageDescription": "Sardine reads basal body temperature, heart rate variability, resting heart rate, and respiratory rate from Apple Health for cycle and fertility insights.",
+          "NSHealthUpdateUsageDescription": "Sardine does not write data to Apple Health.",
+          "background": false
+        }
+      ],
+      "expo-health-connect",
+      "./plugins/withHealthConnectMainActivity",
+      [
         "expo-build-properties",
         {
           "ios": {
             "deploymentTarget": "15.1"
           },
           "android": {
-            "minSdkVersion": 24
+            "minSdkVersion": 26,
+            "compileSdkVersion": 35,
+            "targetSdkVersion": 35
           }
         }
       ],

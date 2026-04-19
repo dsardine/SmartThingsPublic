@@ -1,7 +1,18 @@
 import { useCallback, useState } from 'react';
-import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  View,
+} from 'react-native';
 import * as Sharing from 'expo-sharing';
-import { type Href, useRouter } from 'expo-router';
+import { type Href, useFocusEffect, useRouter } from 'expo-router';
 
 import { PremiumPaywall } from '@/components/PremiumPaywall';
 import {
@@ -10,6 +21,16 @@ import {
   generateClinicalPDF,
   writeClinicalCsvFile,
 } from '@/src/lib/exportService';
+import {
+  getHealthConnectMenuSummary,
+  healthConnectOpenSettings,
+  healthConnectRequestReadPermissions,
+} from '@/src/lib/healthConnectAndroid';
+import {
+  getHealthKitMenuSummary,
+  healthKitOpenHealthApp,
+  healthKitRequestReadPermissions,
+} from '@/src/lib/healthKitIOS';
 import { supabase } from '@/src/lib/supabase';
 import { useAppStore } from '@/src/store';
 import { colors } from '@/src/styles/theme';
@@ -26,6 +47,28 @@ export default function MenuScreen() {
   const [paywallOpen, setPaywallOpen] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
   const [signOutBusy, setSignOutBusy] = useState(false);
+  const [wearableSummary, setWearableSummary] = useState<string | null>(null);
+  const [wearableBusy, setWearableBusy] = useState(false);
+
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      void (async () => {
+        if (Platform.OS === 'android') {
+          const summary = await getHealthConnectMenuSummary();
+          if (alive) setWearableSummary(summary);
+        } else if (Platform.OS === 'ios') {
+          const summary = await getHealthKitMenuSummary();
+          if (alive) setWearableSummary(summary);
+        } else if (alive) {
+          setWearableSummary(null);
+        }
+      })();
+      return () => {
+        alive = false;
+      };
+    }, []),
+  );
 
   const persistProfile = useCallback(
     async (patch: {
@@ -111,6 +154,29 @@ export default function MenuScreen() {
     }
   };
 
+  const onWearableAllow = async () => {
+    setWearableBusy(true);
+    try {
+      if (Platform.OS === 'android') {
+        const result = await healthConnectRequestReadPermissions();
+        if (!result.ok) {
+          Alert.alert('Health Connect', result.reason);
+          return;
+        }
+        setWearableSummary(await getHealthConnectMenuSummary());
+      } else if (Platform.OS === 'ios') {
+        const result = await healthKitRequestReadPermissions();
+        if (!result.ok) {
+          Alert.alert('Apple Health', result.reason);
+          return;
+        }
+        setWearableSummary(await getHealthKitMenuSummary());
+      }
+    } finally {
+      setWearableBusy(false);
+    }
+  };
+
   const signOut = async () => {
     setSignOutBusy(true);
     try {
@@ -129,6 +195,52 @@ export default function MenuScreen() {
     <ScrollView contentContainerStyle={styles.root} keyboardShouldPersistTaps="handled">
       <Text style={styles.title}>Preferences</Text>
       <Text style={styles.sub}>Locale, calendar, and Ghost Mode stay yours — we just sync what you allow.</Text>
+
+      {Platform.OS === 'android' || Platform.OS === 'ios' ? (
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>
+            {Platform.OS === 'android' ? 'Google Health Connect' : 'Apple Health'}
+          </Text>
+          <Text style={styles.cardBody}>
+            {wearableSummary ??
+              (Platform.OS === 'android'
+                ? 'Checking Health Connect… Sardine reads resting heart rate, HRV, respiratory rate, and basal body temperature when you allow it.'
+                : 'Checking Apple Health… Sardine reads basal temperature, HRV (SDNN), resting heart rate, and respiratory rate when you allow it.')}
+          </Text>
+          {wearableBusy ? (
+            <ActivityIndicator style={{ marginVertical: 10 }} color={colors.primarySageGreen} />
+          ) : (
+            <View style={styles.exportRow}>
+              <Pressable
+                style={styles.exportBtn}
+                onPress={() => void onWearableAllow()}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  Platform.OS === 'android' ? 'Allow Health Connect read access' : 'Allow Apple Health read access'
+                }>
+                <Text style={styles.exportBtnTxt}>Allow access</Text>
+              </Pressable>
+              <Pressable
+                style={styles.secondaryOutlineBtn}
+                onPress={() => {
+                  if (Platform.OS === 'android') {
+                    void healthConnectOpenSettings();
+                  } else {
+                    void healthKitOpenHealthApp();
+                  }
+                }}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  Platform.OS === 'android' ? 'Open Health Connect settings' : 'Open Apple Health app'
+                }>
+                <Text style={styles.secondaryOutlineBtnTxt}>
+                  {Platform.OS === 'android' ? 'Health Connect settings' : 'Open Health app'}
+                </Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
+      ) : null}
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Ghost Mode</Text>
@@ -315,4 +427,15 @@ const styles = StyleSheet.create({
   },
   signOutBtnDisabled: { opacity: 0.6 },
   signOutTxt: { color: colors.mutedCoral, fontWeight: '800', fontSize: 15 },
+  secondaryOutlineBtn: {
+    marginTop: 4,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: colors.primarySageGreen,
+    alignItems: 'center',
+    backgroundColor: colors.background,
+  },
+  secondaryOutlineBtnTxt: { color: colors.primarySageGreen, fontWeight: '800', fontSize: 15 },
 });

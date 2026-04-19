@@ -3,6 +3,7 @@ import { useCallback, useMemo, useState } from 'react';
 import {
   Dimensions,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -11,6 +12,8 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import { Picker } from '@react-native-picker/picker';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 
@@ -57,19 +60,73 @@ type FormState = {
   test_results: string;
 };
 
-const emptyForm: FormState = {
-  manual_bbt: '',
-  bbt_time_taken: '07:30',
-  exclude_temp: false,
-  disturbances: [],
-  cervical_position: null,
-  cervical_firmness: null,
-  bleeding: null,
-  intercourse: null,
-  cervical_fluid: null,
-  symptoms: '',
-  test_results: '',
-};
+type TempUnit = 'F' | 'C';
+
+function formatHHMM(d: Date): string {
+  const h = d.getHours();
+  const m = d.getMinutes();
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function defaultBbtString(unit: TempUnit): string {
+  return unit === 'F' ? '98.60' : '37.00';
+}
+
+function normalizeHHMM(input: string): string {
+  const p = input.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!p) return formatHHMM(new Date());
+  const h = Math.min(23, Math.max(0, parseInt(p[1], 10)));
+  const m = Math.min(59, Math.max(0, parseInt(p[2], 10)));
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function parseBbtTimeToDate(hhmm: string): Date {
+  const d = new Date();
+  const p = hhmm.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (p) {
+    d.setHours(parseInt(p[1], 10), parseInt(p[2], 10), 0, 0);
+  }
+  return d;
+}
+
+/** °F 96.00–101.00 or °C 35.50–40.00 in 0.01° steps (integer hundredths to avoid float drift). */
+function bbtPickerNumericOptions(unit: TempUnit): string[] {
+  const out: string[] = [];
+  const startH = unit === 'F' ? 9600 : 3550;
+  const endH = unit === 'F' ? 10100 : 4000;
+  for (let h = startH; h <= endH; h += 1) {
+    out.push((h / 100).toFixed(2));
+  }
+  return out;
+}
+
+/** Maps a stored or typed value onto the picker grid (0.01° within range). */
+function coerceBbtForPicker(value: unknown, unit: TempUnit): string {
+  const n = Number.parseFloat(String(value ?? '').trim());
+  if (!Number.isFinite(n)) return '';
+  const startH = unit === 'F' ? 9600 : 3550;
+  const endH = unit === 'F' ? 10100 : 4000;
+  const nh = Math.round(n * 100);
+  const clampedH = Math.min(endH, Math.max(startH, nh));
+  return (clampedH / 100).toFixed(2);
+}
+
+function defaultForm(unit: TempUnit, patch: Partial<FormState> = {}): FormState {
+  return {
+    manual_bbt: defaultBbtString(unit),
+    bbt_time_taken: formatHHMM(new Date()),
+    exclude_temp: false,
+    disturbances: [],
+    cervical_position: null,
+    cervical_firmness: null,
+    bleeding: null,
+    intercourse: null,
+    cervical_fluid: null,
+    symptoms: '',
+    test_results: '',
+    ...patch,
+  };
+}
 
 function startOfMonth(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), 1);
@@ -84,7 +141,9 @@ const GRID_PAD = 16;
 export default function CalendarScreen() {
   const firstDayOfWeek = useAppStore((s) => s.preferences.firstDayOfWeek);
   const dateFormat = useAppStore((s) => s.preferences.dateFormat);
+  const temperatureUnit = useAppStore((s) => s.preferences.temperatureUnit);
   const isGhost = useAppStore((s) => s.isGhostModeEnabled);
+  const tempUnit: TempUnit = temperatureUnit === 'C' ? 'C' : 'F';
 
   const cell = useMemo(() => {
     const w = Dimensions.get('window').width - GRID_PAD;
@@ -96,7 +155,7 @@ export default function CalendarScreen() {
   const [fertileEnd, setFertileEnd] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [selectedIso, setSelectedIso] = useState<string | null>(null);
-  const [form, setForm] = useState<FormState>(emptyForm);
+  const [form, setForm] = useState<FormState>(() => defaultForm('F'));
   const [saving, setSaving] = useState(false);
 
   const loadFertile = useCallback(async () => {
@@ -176,6 +235,8 @@ export default function CalendarScreen() {
     [monthCursor],
   );
 
+  const bbtPickerValues = useMemo(() => bbtPickerNumericOptions(tempUnit), [tempUnit]);
+
   const grid = useMemo(() => {
     const first = startOfMonth(monthCursor);
     const dim = daysInMonth(monthCursor);
@@ -200,17 +261,26 @@ export default function CalendarScreen() {
 
   const openForDate = async (iso: string) => {
     setSelectedIso(iso);
-    setForm(emptyForm);
+    setForm(defaultForm(tempUnit));
     if (isGhost) {
       const raw = ghostStorage.getString(`${GHOST_MANUAL_KEY_PREFIX}${iso}`);
       if (raw) {
         try {
           const o = JSON.parse(raw) as Record<string, unknown>;
+          const base = defaultForm(tempUnit);
+          const mb =
+            typeof o.manual_bbt === 'string'
+              ? o.manual_bbt
+              : o.manual_bbt != null
+                ? String(o.manual_bbt)
+                : '';
           setForm({
-            ...emptyForm,
-            ...o,
-            manual_bbt: typeof o.manual_bbt === 'string' ? o.manual_bbt : String(o.manual_bbt ?? ''),
-            bbt_time_taken: typeof o.bbt_time_taken === 'string' ? o.bbt_time_taken : emptyForm.bbt_time_taken,
+            ...base,
+            manual_bbt: mb.trim() !== '' ? coerceBbtForPicker(mb, tempUnit) : '',
+            bbt_time_taken:
+              typeof o.bbt_time_taken === 'string' && /^\d{1,2}:\d{2}$/.test(o.bbt_time_taken.trim())
+                ? normalizeHHMM(o.bbt_time_taken)
+                : base.bbt_time_taken,
             exclude_temp: o.exclude_temp === true,
             disturbances: Array.isArray(o.disturbances)
               ? (o.disturbances as ManualLogDisturbance[])
@@ -253,10 +323,16 @@ export default function CalendarScreen() {
       .maybeSingle();
     if (data) {
       const r = data as Record<string, unknown>;
+      const timeStr =
+        typeof r.bbt_time_taken === 'string' && String(r.bbt_time_taken).length >= 5
+          ? String(r.bbt_time_taken).slice(0, 5)
+          : formatHHMM(new Date());
       setForm({
-        manual_bbt: r.manual_bbt != null ? String(r.manual_bbt) : '',
-        bbt_time_taken:
-          typeof r.bbt_time_taken === 'string' ? String(r.bbt_time_taken).slice(0, 5) : '07:30',
+        manual_bbt:
+          r.manual_bbt != null && String(r.manual_bbt).trim() !== ''
+            ? coerceBbtForPicker(r.manual_bbt, tempUnit)
+            : '',
+        bbt_time_taken: normalizeHHMM(timeStr),
         exclude_temp: r.exclude_temp === true,
         disturbances: Array.isArray(r.disturbances) ? (r.disturbances as ManualLogDisturbance[]) : [],
         cervical_position: (r.cervical_position as ManualLogCervicalPosition) ?? null,
@@ -397,22 +473,48 @@ export default function CalendarScreen() {
                 : 'Log'}
             </Text>
             <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 40 }}>
-              <Field label="Manual BBT">
-                <TextInput
-                  keyboardType="decimal-pad"
-                  value={form.manual_bbt}
-                  onChangeText={(t) => setForm((f) => ({ ...f, manual_bbt: t }))}
-                  placeholder="e.g. 97.4"
-                  style={styles.input}
-                />
+              <Field label={`Manual BBT (°${tempUnit})`}>
+                {Platform.OS === 'web' ? (
+                  <TextInput
+                    keyboardType="decimal-pad"
+                    value={form.manual_bbt}
+                    onChangeText={(t) => setForm((f) => ({ ...f, manual_bbt: t }))}
+                    placeholder={defaultBbtString(tempUnit)}
+                    style={styles.input}
+                  />
+                ) : (
+                  <View style={styles.pickerWrap}>
+                    <Picker
+                      itemStyle={Platform.OS === 'ios' ? styles.pickerItemIos : undefined}
+                      selectedValue={form.manual_bbt}
+                      onValueChange={(v) => setForm((f) => ({ ...f, manual_bbt: String(v) }))}>
+                      <Picker.Item label="No reading" value="" color={colors.textDark} />
+                      {bbtPickerValues.map((t) => (
+                        <Picker.Item key={t} label={`${t}°${tempUnit}`} value={t} color={colors.textDark} />
+                      ))}
+                    </Picker>
+                  </View>
+                )}
               </Field>
               <Field label="Time taken">
-                <TextInput
-                  value={form.bbt_time_taken}
-                  onChangeText={(t) => setForm((f) => ({ ...f, bbt_time_taken: t }))}
-                  placeholder="HH:MM"
-                  style={styles.input}
-                />
+                {Platform.OS === 'web' ? (
+                  <TextInput
+                    value={form.bbt_time_taken}
+                    onChangeText={(t) => setForm((f) => ({ ...f, bbt_time_taken: normalizeHHMM(t) }))}
+                    placeholder={formatHHMM(new Date())}
+                    style={styles.input}
+                  />
+                ) : (
+                  <DateTimePicker
+                    value={parseBbtTimeToDate(form.bbt_time_taken)}
+                    mode="time"
+                    display="spinner"
+                    themeVariant="light"
+                    onChange={(_, date) => {
+                      if (date) setForm((f) => ({ ...f, bbt_time_taken: formatHHMM(date) }));
+                    }}
+                  />
+                )}
               </Field>
               <View style={styles.rowBetween}>
                 <Text style={styles.fieldLbl}>Exclude temp from chart</Text>
@@ -574,6 +676,24 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: colors.textDark,
     backgroundColor: colors.background,
+  },
+  pickerWrap: {
+    borderWidth: 1,
+    borderColor: colors.chartGrid,
+    borderRadius: 10,
+    backgroundColor: colors.background,
+    overflow: 'hidden',
+    ...Platform.select({
+      ios: { height: 168 },
+      android: { height: 160 },
+      default: { minHeight: 54 },
+    }),
+    justifyContent: 'center',
+  },
+  pickerItemIos: {
+    fontSize: 20,
+    height: 160,
+    color: colors.textDark,
   },
   rowBetween: {
     flexDirection: 'row',
