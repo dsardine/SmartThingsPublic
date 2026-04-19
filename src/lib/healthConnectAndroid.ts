@@ -24,6 +24,8 @@ export const SARDINE_HEALTH_CONNECT_READ: Permission[] = [
   { accessType: 'read', recordType: 'RespiratoryRate' },
   { accessType: 'read', recordType: 'SleepSession' },
   { accessType: 'read', recordType: 'MenstruationFlow' },
+  /** Same OS grant as flow; Pixel / Fit often log cycle as interval periods, not daily flow. */
+  { accessType: 'read', recordType: 'MenstruationPeriod' },
 ];
 
 export const SARDINE_HEALTH_CONNECT_HISTORY: ReadHealthDataHistoryPermission = {
@@ -145,20 +147,29 @@ export async function healthConnectOpenSettings(): Promise<void> {
   }
 }
 
-function buildTimeRangeFilter(lookbackDays: number | null | undefined): TimeRangeFilter {
-  const end = new Date();
-  const endTime = end.toISOString();
-  if (lookbackDays == null) {
-    return { operator: 'before', endTime };
-  }
-  const start = new Date(end);
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - lookbackDays);
-  return {
-    operator: 'between',
-    startTime: start.toISOString(),
-    endTime,
-  };
+/**
+ * Open-ended read window for Health Connect imports.
+ * Using `between` with a start older than the OS “recent data” window can yield **zero rows**
+ * when `READ_HEALTH_DATA_HISTORY` is not in effect (common on API 34 / limited history grant).
+ * We read everything the OS allows, then apply `lookbackDays` on the client.
+ */
+function buildHcImportReadTimeRangeFilter(): TimeRangeFilter {
+  return { operator: 'before', endTime: new Date().toISOString() };
+}
+
+/** Local-midnight cutoff instant for bounded imports; `null` = no cutoff (all rows HC returns). */
+function importCutoffMs(lookbackDays: number | null | undefined): number | null {
+  if (lookbackDays == null) return null;
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - lookbackDays);
+  return d.getTime();
+}
+
+function recordTimeAtOrAfterCutoff(isoInstant: string, cutoffMs: number | null): boolean {
+  if (cutoffMs == null) return true;
+  const t = new Date(isoInstant).getTime();
+  return !Number.isNaN(t) && t >= cutoffMs;
 }
 
 function pad2(n: number): string {
@@ -180,6 +191,8 @@ function flowIntToBleeding(flow: number | undefined): ManualLogBleeding | null {
   if (flow === MenstruationFlow.LIGHT) return 'Light';
   if (flow === MenstruationFlow.MEDIUM) return 'Medium';
   if (flow === MenstruationFlow.HEAVY) return 'Heavy';
+  /** OEMs often log flow as UNKNOWN (0); still import as generic period presence. */
+  if (flow === MenstruationFlow.UNKNOWN) return 'Medium';
   return null;
 }
 
@@ -212,6 +225,21 @@ async function readPagedRecords<T extends RecordType>(
     pageToken = res.pageToken;
   } while (pageToken);
   return acc;
+}
+
+async function readPagedRecordsSafe<T extends RecordType>(
+  hc: typeof import('react-native-health-connect'),
+  recordType: T,
+  timeRangeFilter: TimeRangeFilter,
+): Promise<RecordResult<T>[]> {
+  try {
+    return await readPagedRecords(hc, recordType, timeRangeFilter);
+  } catch (e) {
+    if (__DEV__) {
+      console.warn(`[HealthConnect] readRecords(${recordType}) failed:`, e);
+    }
+    return [];
+  }
 }
 
 type SleepInterval = { start: Date; end: Date };
@@ -325,20 +353,22 @@ type HcImportMaps = {
 
 async function readHealthConnectImportMaps(
   hc: typeof import('react-native-health-connect'),
-  timeRangeFilter: TimeRangeFilter,
   profileTempUnit: TemperatureUnit,
   lookbackDays: number | null | undefined,
 ): Promise<HcImportMaps> {
   const profileU: 'F' | 'C' = profileTempUnit === 'C' ? 'C' : 'F';
+  const readFilter = buildHcImportReadTimeRangeFilter();
+  const cutoffMs = importCutoffMs(lookbackDays);
 
-  const [flows, bbts, bodyTemps, rhrRows, hrvRows, rrRows, sleepRows] = await Promise.all([
-    readPagedRecords(hc, 'MenstruationFlow', timeRangeFilter),
-    readPagedRecords(hc, 'BasalBodyTemperature', timeRangeFilter),
-    readPagedRecords(hc, 'BodyTemperature', timeRangeFilter),
-    readPagedRecords(hc, 'RestingHeartRate', timeRangeFilter),
-    readPagedRecords(hc, 'HeartRateVariabilityRmssd', timeRangeFilter),
-    readPagedRecords(hc, 'RespiratoryRate', timeRangeFilter),
-    readPagedRecords(hc, 'SleepSession', timeRangeFilter),
+  const [flows, periodRanges, bbts, bodyTemps, rhrRows, hrvRows, rrRows, sleepRows] = await Promise.all([
+    readPagedRecordsSafe(hc, 'MenstruationFlow', readFilter),
+    readPagedRecordsSafe(hc, 'MenstruationPeriod', readFilter),
+    readPagedRecordsSafe(hc, 'BasalBodyTemperature', readFilter),
+    readPagedRecordsSafe(hc, 'BodyTemperature', readFilter),
+    readPagedRecordsSafe(hc, 'RestingHeartRate', readFilter),
+    readPagedRecordsSafe(hc, 'HeartRateVariabilityRmssd', readFilter),
+    readPagedRecordsSafe(hc, 'RespiratoryRate', readFilter),
+    readPagedRecordsSafe(hc, 'SleepSession', readFilter),
   ]);
 
   const manualByDate = new Map<string, HcDayPatch>();
@@ -352,6 +382,7 @@ async function readHealthConnectImportMaps(
   };
 
   for (const r of flows) {
+    if (!recordTimeAtOrAfterCutoff(r.time, cutoffMs)) continue;
     const iso = isoDateString(new Date(r.time));
     const bleeding = flowIntToBleeding(r.flow);
     if (!bleeding) continue;
@@ -359,7 +390,37 @@ async function readHealthConnectImportMaps(
     cur.bleeding = bleeding;
   }
 
+  /** Google Fit / Pixel "cycle tracking" often writes interval rows, not per-day MenstruationFlow. */
+  for (const r of periodRanges) {
+    const pr = r as { startTime?: string; endTime?: string; time?: string };
+    let startIso = typeof pr.startTime === 'string' ? pr.startTime : null;
+    let endIso = typeof pr.endTime === 'string' ? pr.endTime : null;
+    if ((!startIso || !endIso) && typeof pr.time === 'string') {
+      startIso = pr.time;
+      endIso = pr.time;
+    }
+    if (!startIso || !endIso) continue;
+    const start = new Date(startIso);
+    const end = new Date(endIso);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) continue;
+    if (cutoffMs != null && end.getTime() < cutoffMs) continue;
+    let dayStart = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    const dayEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+    if (cutoffMs != null) {
+      const co = new Date(cutoffMs);
+      const cutoffDay = new Date(co.getFullYear(), co.getMonth(), co.getDate());
+      if (dayStart < cutoffDay) dayStart = cutoffDay;
+    }
+    for (const iso of iterateWakeIsoDatesInclusive(dayStart, dayEnd)) {
+      const cur = touchManual(iso);
+      if (cur.bleeding == null) {
+        cur.bleeding = 'Medium';
+      }
+    }
+  }
+
   for (const r of bbts) {
+    if (!recordTimeAtOrAfterCutoff(r.time, cutoffMs)) continue;
     const iso = isoDateString(new Date(r.time));
     const t = r.temperature;
     if (!t || !Number.isFinite(t.inCelsius) || !Number.isFinite(t.inFahrenheit)) continue;
@@ -611,11 +672,10 @@ export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
   const hc = await loadHealthConnectModule();
   if (!hc) return { ok: false, reason: 'Health Connect module failed to load.' };
 
-  const timeRangeFilter = buildTimeRangeFilter(lookbackDays);
   let manualByDate: Map<string, HcDayPatch>;
   let bioByDate: Map<string, HcBioDayPatch>;
   try {
-    const maps = await readHealthConnectImportMaps(hc, timeRangeFilter, temperatureUnit, lookbackDays);
+    const maps = await readHealthConnectImportMaps(hc, temperatureUnit, lookbackDays);
     manualByDate = maps.manualByDate;
     bioByDate = maps.bioByDate;
   } catch (e) {
