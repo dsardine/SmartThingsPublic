@@ -13,6 +13,7 @@
     "@react-navigation/native": "^7.1.8",
     "@supabase/supabase-js": "^2.103.2",
     "expo": "~54.0.33",
+    "expo-auth-session": "~7.0.10",
     "expo-background-fetch": "~14.0.9",
     "expo-build-properties": "~1.0.10",
     "expo-constants": "~18.0.13",

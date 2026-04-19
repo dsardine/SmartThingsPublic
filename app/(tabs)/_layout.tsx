@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { type Href, Redirect, Tabs, useRouter } from 'expo-router';
-import { Pressable } from 'react-native';
+import { ActivityIndicator, Pressable, View } from 'react-native';
 
 import { useClientOnlyValue } from '@/components/useClientOnlyValue';
 import { supabase } from '@/src/lib/supabase';
@@ -45,7 +45,17 @@ export default function TabLayout() {
   }, [session?.user?.id, hydratePreferences]);
 
   if (!authHydrated) {
-    return null;
+    return (
+      <View
+        style={{
+          flex: 1,
+          justifyContent: 'center',
+          alignItems: 'center',
+          backgroundColor: colors.background,
+        }}>
+        <ActivityIndicator size="large" color={colors.primarySageGreen} />
+      </View>
+    );
   }
 
   if (!session) {

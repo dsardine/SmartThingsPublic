@@ -6,6 +6,7 @@ import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native
 import { useFonts } from 'expo-font';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
+import * as WebBrowser from 'expo-web-browser';
 import { useEffect, useRef, useState } from 'react';
 import { AppState, StyleSheet, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -26,6 +27,7 @@ export const unstable_settings = {
 };
 
 SplashScreen.preventAutoHideAsync();
+WebBrowser.maybeCompleteAuthSession();
 
 export default function RootLayout() {
   const [loaded, error] = useFonts({
@@ -100,9 +102,11 @@ export default function RootLayout() {
 
     const sub = AppState.addEventListener('change', (nextState) => {
       const prevState = appStateRef.current;
+      const hasSession = useAppStore.getState().session != null;
 
       if (
         getAppLockEnabled() &&
+        hasSession &&
         nextState === 'active' &&
         prevState !== 'active' &&
         Date.now() >= resumeLockBypassUntilRef.current
