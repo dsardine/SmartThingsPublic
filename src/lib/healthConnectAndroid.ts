@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { Alert, Platform } from 'react-native';
 
 import { addCalendarDays, isoDateString, parseIsoDate } from '@/src/lib/dateDisplay';
 import { GHOST_MANUAL_KEY_PREFIX } from '@/src/lib/manualGhostMerge';
@@ -147,27 +147,39 @@ export async function healthConnectOpenSettings(): Promise<void> {
   }
 }
 
-/**
- * Open-ended read window for Health Connect imports.
- * Using `between` with a start older than the OS “recent data” window can yield **zero rows**
- * when `READ_HEALTH_DATA_HISTORY` is not in effect (common on API 34 / limited history grant).
- * We read everything the OS allows, then apply `lookbackDays` on the client.
- */
-function buildHcImportReadTimeRangeFilter(): TimeRangeFilter {
-  return { operator: 'before', endTime: new Date().toISOString() };
+/** `null` / `undefined` lookback uses 30 days (matches HC read window default). */
+function effectiveLookbackDays(lookbackDays: number | null | undefined): number {
+  return lookbackDays ?? 30;
 }
 
-/** Local-midnight cutoff instant for bounded imports; `null` = no cutoff (all rows HC returns). */
-function importCutoffMs(lookbackDays: number | null | undefined): number | null {
-  if (lookbackDays == null) return null;
+/**
+ * Bounded `between` window for Health Connect reads so high-frequency types (e.g. BodyTemperature)
+ * do not stream unbounded history across the native bridge (memory / stability).
+ */
+function buildHcImportReadTimeRangeFilter(lookbackDays: number | null | undefined): TimeRangeFilter {
+  const days = effectiveLookbackDays(lookbackDays);
+  const end = new Date();
+  const endTime = end.toISOString();
+  const start = new Date(end);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - days);
+  return {
+    operator: 'between',
+    startTime: start.toISOString(),
+    endTime,
+  };
+}
+
+/** Local-midnight cutoff aligned with `buildHcImportReadTimeRangeFilter`. */
+function importCutoffMs(lookbackDays: number | null | undefined): number {
+  const days = effectiveLookbackDays(lookbackDays);
   const d = new Date();
   d.setHours(0, 0, 0, 0);
-  d.setDate(d.getDate() - lookbackDays);
+  d.setDate(d.getDate() - days);
   return d.getTime();
 }
 
-function recordTimeAtOrAfterCutoff(isoInstant: string, cutoffMs: number | null): boolean {
-  if (cutoffMs == null) return true;
+function recordTimeAtOrAfterCutoff(isoInstant: string, cutoffMs: number): boolean {
   const t = new Date(isoInstant).getTime();
   return !Number.isNaN(t) && t >= cutoffMs;
 }
@@ -235,6 +247,8 @@ async function readPagedRecordsSafe<T extends RecordType>(
   try {
     return await readPagedRecords(hc, recordType, timeRangeFilter);
   } catch (e) {
+    const errorMsg = e instanceof Error ? e.message : String(e);
+    Alert.alert(`Health Connect Error: ${recordType}`, errorMsg);
     if (__DEV__) {
       console.warn(`[HealthConnect] readRecords(${recordType}) failed:`, e);
     }
@@ -323,15 +337,10 @@ function averageFinite(values: number[]): number | null {
 function bioImportLocalDayRange(lookbackDays: number | null | undefined): { start: Date; end: Date } {
   const end = new Date();
   end.setHours(23, 59, 59, 999);
-  if (lookbackDays == null) {
-    const start = new Date(end);
-    start.setHours(0, 0, 0, 0);
-    start.setDate(start.getDate() - 800);
-    return { start, end };
-  }
+  const days = effectiveLookbackDays(lookbackDays);
   const start = new Date(end);
   start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - lookbackDays);
+  start.setDate(start.getDate() - days);
   return { start, end };
 }
 
@@ -357,7 +366,7 @@ async function readHealthConnectImportMaps(
   lookbackDays: number | null | undefined,
 ): Promise<HcImportMaps> {
   const profileU: 'F' | 'C' = profileTempUnit === 'C' ? 'C' : 'F';
-  const readFilter = buildHcImportReadTimeRangeFilter();
+  const readFilter = buildHcImportReadTimeRangeFilter(lookbackDays);
   const cutoffMs = importCutoffMs(lookbackDays);
 
   const [flows, periodRanges, bbts, bodyTemps, rhrRows, hrvRows, rrRows, sleepRows] = await Promise.all([
@@ -403,14 +412,12 @@ async function readHealthConnectImportMaps(
     const start = new Date(startIso);
     const end = new Date(endIso);
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) continue;
-    if (cutoffMs != null && end.getTime() < cutoffMs) continue;
+    if (end.getTime() < cutoffMs) continue;
     let dayStart = new Date(start.getFullYear(), start.getMonth(), start.getDate());
     const dayEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate());
-    if (cutoffMs != null) {
-      const co = new Date(cutoffMs);
-      const cutoffDay = new Date(co.getFullYear(), co.getMonth(), co.getDate());
-      if (dayStart < cutoffDay) dayStart = cutoffDay;
-    }
+    const co = new Date(cutoffMs);
+    const cutoffDay = new Date(co.getFullYear(), co.getMonth(), co.getDate());
+    if (dayStart < cutoffDay) dayStart = cutoffDay;
     for (const iso of iterateWakeIsoDatesInclusive(dayStart, dayEnd)) {
       const cur = touchManual(iso);
       if (cur.bleeding == null) {
@@ -641,7 +648,8 @@ export type HealthConnectManualSyncResult =
  * Ghost Mode: only `manual_logs` (MMKV); biometrics stay cloud-only and are skipped.
  * Does not overwrite existing manual or biometrics fields when already set.
  *
- * @param lookbackDays When `null` or `undefined`, uses a non-restrictive time filter (all history allowed by Health Connect).
+ * @param lookbackDays Calendar days to include. When `null` or `undefined`, defaults to **30** for
+ * Health Connect reads (bounded `between` window) to avoid huge high-frequency payloads across the bridge.
  */
 export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
   lookbackDays?: number | null;
