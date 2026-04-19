@@ -78,6 +78,7 @@
         }
       ],
       "expo-health-connect",
+      "./plugins/withAndroidHealthConnectDataPermissions",
       "./plugins/withHealthConnectMainActivity",
       [
         "expo-build-properties",

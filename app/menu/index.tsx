@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
+  type AppStateStatus,
   Modal,
   Platform,
   Pressable,
@@ -87,9 +89,50 @@ export default function MenuScreen() {
     setTrackOnlyBbtOptIn(getTrackOnlyBbtDailyRemindersOptIn());
   }, [trackingGoal]);
 
+  /** Re-query OS permission state (Health Connect / HealthKit). */
+  const refreshWearablePermissionState = useCallback(
+    async (cancelled?: () => boolean) => {
+      const dead = () => cancelled?.() === true;
+      if (Platform.OS === 'android') {
+        const [summary, granted] = await Promise.all([
+          getHealthConnectMenuSummary(),
+          healthConnectHasAllReadPermissions(),
+        ]);
+        if (dead()) return;
+        setWearableSummary(summary);
+        setWearablePermissionsComplete(granted);
+        return;
+      }
+      if (Platform.OS === 'ios') {
+        const [summary, granted] = await Promise.all([
+          getHealthKitMenuSummary(),
+          healthKitHasAllReadPermissions(),
+        ]);
+        if (dead()) return;
+        setWearableSummary(summary);
+        setWearablePermissionsComplete(granted);
+        return;
+      }
+      if (dead()) return;
+      setWearableSummary(null);
+      setWearablePermissionsComplete(null);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (Platform.OS !== 'android' && Platform.OS !== 'ios') return;
+    const onAppState = (s: AppStateStatus) => {
+      if (s === 'active') void refreshWearablePermissionState();
+    };
+    const sub = AppState.addEventListener('change', onAppState);
+    return () => sub.remove();
+  }, [refreshWearablePermissionState]);
+
   useFocusEffect(
     useCallback(() => {
       let alive = true;
+      const cancelled = () => !alive;
       void (async () => {
         if (session?.user?.id) {
           const { data } = await supabase
@@ -118,33 +161,18 @@ export default function MenuScreen() {
             });
           }
         }
-        if (Platform.OS === 'android') {
-          const [summary, granted] = await Promise.all([
-            getHealthConnectMenuSummary(),
-            healthConnectHasAllReadPermissions(),
-          ]);
-          if (alive) {
-            setWearableSummary(summary);
-            setWearablePermissionsComplete(granted);
-          }
-        } else if (Platform.OS === 'ios') {
-          const [summary, granted] = await Promise.all([
-            getHealthKitMenuSummary(),
-            healthKitHasAllReadPermissions(),
-          ]);
-          if (alive) {
-            setWearableSummary(summary);
-            setWearablePermissionsComplete(granted);
-          }
-        } else if (alive) {
-          setWearableSummary(null);
-          setWearablePermissionsComplete(null);
-        }
+        await refreshWearablePermissionState(cancelled);
       })();
       return () => {
         alive = false;
       };
-    }, [session?.user?.id, hydrateClinicalFromProfile, hydrateCycleLengthFromProfile, isGhost]),
+    }, [
+      session?.user?.id,
+      hydrateClinicalFromProfile,
+      hydrateCycleLengthFromProfile,
+      isGhost,
+      refreshWearablePermissionState,
+    ]),
   );
 
   const persistProfile = useCallback(
@@ -344,16 +372,14 @@ export default function MenuScreen() {
           Alert.alert('Health Connect', result.reason);
           return;
         }
-        setWearableSummary(await getHealthConnectMenuSummary());
-        setWearablePermissionsComplete(await healthConnectHasAllReadPermissions());
+        await refreshWearablePermissionState();
       } else if (Platform.OS === 'ios') {
         const result = await healthKitRequestReadPermissions();
         if (!result.ok) {
           Alert.alert('Apple Health', result.reason);
           return;
         }
-        setWearableSummary(await getHealthKitMenuSummary());
-        setWearablePermissionsComplete(await healthKitHasAllReadPermissions());
+        await refreshWearablePermissionState();
       }
     } finally {
       setWearableBusy(false);

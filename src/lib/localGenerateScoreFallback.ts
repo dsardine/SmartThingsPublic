@@ -34,6 +34,8 @@ type UnifiedScore = {
   clinical_engine_paused?: boolean;
   score_basis?: ScoreBasis;
   statistical_period_only?: boolean;
+  full_confidence_requires_premium?: boolean;
+  confidence_cap_applied?: boolean;
 };
 
 function clampScore(n: number): number {
@@ -58,6 +60,8 @@ function computeFreeTierUnified(
   profileFallback: ProfileCycleIntake | null,
   clinicalState: ClinicalState,
   trackingGoal: TrackingGoal,
+  isPremium: boolean,
+  isLimitedData: boolean,
 ): UnifiedScore {
   const algo = calculateFertileWindow(
     dailySeries,
@@ -70,6 +74,8 @@ function computeFreeTierUnified(
     temperatureUnit,
     thermal: algo,
     trackingGoal,
+    isPremium,
+    isLimitedData,
   });
   const rules = rulesResultToUnified(algo);
   return {
@@ -77,10 +83,15 @@ function computeFreeTierUnified(
     fertility_score: local.fertility_score,
     ai_narrative: `${local.scoreAttributionLine}\n\n${algo.ai_narrative}`,
     score_basis: local.score_basis,
+    full_confidence_requires_premium: local.full_confidence_requires_premium,
+    confidence_cap_applied: local.confidence_cap_applied,
   };
 }
 
-function applyStatisticalDetectiveAdjustments(u: UnifiedScore, active: boolean): UnifiedScore {
+function applyStatisticalDetectiveAdjustments(
+  u: UnifiedScore,
+  active: boolean,
+): UnifiedScore {
   if (!active) return u;
   const fertility_score = Math.min(70, clampScore(u.fertility_score));
   const ai_narrative = u.ai_narrative.includes('cycle history so far')
@@ -103,13 +114,13 @@ async function loadDailySeriesForScore(userId: string): Promise<DailyFertilityIn
   const [{ data: bio, error: bioErr }, { data: logs, error: logsErr }] = await Promise.all([
     supabase
       .from('biometrics')
-      .select('date, sleeping_temp, rhr, hrv, created_at')
+      .select('date, sleeping_temp, rhr, hrv, respiratory_rate, created_at')
       .eq('user_id', userId)
       .order('date', { ascending: true })
       .limit(200),
     supabase
       .from('manual_logs')
-      .select('date, manual_bbt, exclude_temp, disturbances, cervical_fluid')
+      .select('date, manual_bbt, exclude_temp, disturbances, cervical_fluid, bleeding')
       .eq('user_id', userId)
       .order('date', { ascending: true })
       .limit(200),
@@ -127,6 +138,9 @@ async function loadDailySeriesForScore(userId: string): Promise<DailyFertilityIn
     if (r.sleeping_temp != null) cur.sleeping_temp = Number(r.sleeping_temp);
     if (r.rhr != null) cur.rhr = Number(r.rhr);
     if (r.hrv != null && Number.isFinite(Number(r.hrv))) cur.hrv = Number(r.hrv);
+    if (r.respiratory_rate != null && Number.isFinite(Number(r.respiratory_rate))) {
+      cur.respiratory_rate = Number(r.respiratory_rate);
+    }
     byDate.set(d, cur);
   }
 
@@ -144,6 +158,10 @@ async function loadDailySeriesForScore(userId: string): Promise<DailyFertilityIn
     const cf = r.cervical_fluid;
     if (cf != null && String(cf).trim() !== '') {
       cur.cervical_fluid = String(cf);
+    }
+    const bl = r.bleeding;
+    if (bl != null && String(bl).trim() !== '') {
+      cur.bleeding = String(bl);
     }
     byDate.set(d, cur);
   }
@@ -216,7 +234,7 @@ export async function runLocalGenerateScoreFallback(): Promise<
   const { data: prof, error: pErr } = await supabase
     .from('profiles')
     .select(
-      'temperature_unit, last_period_date, cycle_length_avg, onboarding_completed, clinical_state, tracking_goal',
+      'temperature_unit, last_period_date, cycle_length_avg, onboarding_completed, clinical_state, tracking_goal, user_tier',
     )
     .eq('id', user.id)
     .maybeSingle();
@@ -266,6 +284,9 @@ export async function runLocalGenerateScoreFallback(): Promise<
   const trackingGoal: TrackingGoal =
     rawGoal === 'conceive' || rawGoal === 'avoid' || rawGoal === 'track_only' ? rawGoal : 'track_only';
 
+  const tierRaw = (prof as { user_tier?: string | null }).user_tier;
+  const isPremium = tierRaw === 'premium';
+
   if (clinicalState !== 'cycling') {
     const paused = calculateFertileWindow([], tempUnit, profileFallback, clinicalState);
     const unified = rulesResultToUnified(paused);
@@ -298,6 +319,8 @@ export async function runLocalGenerateScoreFallback(): Promise<
     profileFallback,
     clinicalState,
     trackingGoal,
+    isPremium,
+    periodOnly,
   );
   unified = applyStatisticalDetectiveAdjustments(unified, periodOnly);
 
@@ -309,6 +332,8 @@ export async function runLocalGenerateScoreFallback(): Promise<
     clinicalEnginePaused: unified.clinical_engine_paused === true,
     scoreBasis: unified.score_basis ?? null,
     statisticalPeriodOnly: unified.statistical_period_only === true,
+    fullConfidenceRequiresPremium: unified.full_confidence_requires_premium === true,
+    confidenceCapApplied: unified.confidence_cap_applied === true,
   });
 
   const { error: insErr } = await supabase.from('cached_insight').insert({

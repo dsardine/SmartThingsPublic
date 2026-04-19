@@ -23,6 +23,10 @@ export type DailyFertilityInput = {
   disturbances?: string[] | null;
   /** Cervical fluid (manual log); used by AI / premium context, not in 3-over-6 math. */
   cervical_fluid?: string | null;
+  /** Menstrual flow from `manual_logs` (e.g. Light/Medium/Heavy); used for avoid-tuned cycle-day risk. */
+  bleeding?: string | null;
+  /** Wearable respiratory rate (e.g. breaths/min) when present. */
+  respiratory_rate?: number | null;
 };
 
 export type FertileWindowAlgorithmResult = {

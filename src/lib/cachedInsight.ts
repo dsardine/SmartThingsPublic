@@ -18,6 +18,10 @@ export type ParsedInsight = {
   scoreBasis: ScoreBasis | null;
   /** Period/bleeding logs only — no BBT and no wearable rows (see generate-score data density). */
   statisticalPeriodOnly: boolean;
+  /** Stored when free tier — UI may prompt premium for full confidence range. */
+  fullConfidenceRequiresPremium: boolean;
+  /** Stored when free/limited-data confidence cap was applied to the numeric score. */
+  confidenceCapApplied: boolean;
 };
 
 /** Remove prepended attribution block so UI can show it separately. */
@@ -56,6 +60,8 @@ export function parseInsightText(insightText: string): ParsedInsight {
         clinicalEnginePaused: o.clinical_engine_paused === true,
         scoreBasis,
         statisticalPeriodOnly: o.statistical_period_only === true,
+        fullConfidenceRequiresPremium: o.full_confidence_requires_premium === true,
+        confidenceCapApplied: o.confidence_cap_applied === true,
       };
     }
   } catch {
@@ -70,6 +76,8 @@ export function parseInsightText(insightText: string): ParsedInsight {
     clinicalEnginePaused: false,
     scoreBasis: null,
     statisticalPeriodOnly: false,
+    fullConfidenceRequiresPremium: false,
+    confidenceCapApplied: false,
   };
 }
 
@@ -82,6 +90,8 @@ export function buildCachedInsightText(args: {
   clinicalEnginePaused?: boolean;
   scoreBasis?: ScoreBasis | null;
   statisticalPeriodOnly?: boolean;
+  fullConfidenceRequiresPremium?: boolean;
+  confidenceCapApplied?: boolean;
 }): string {
   const payload: Record<string, unknown> = {
     narrative: args.narrative,
@@ -94,6 +104,12 @@ export function buildCachedInsightText(args: {
     payload.score_basis = args.scoreBasis;
   }
   if (args.statisticalPeriodOnly === true) payload.statistical_period_only = true;
+  if (args.fullConfidenceRequiresPremium === true) {
+    payload.full_confidence_requires_premium = true;
+  }
+  if (args.confidenceCapApplied === true) {
+    payload.confidence_cap_applied = true;
+  }
   return JSON.stringify(payload);
 }
 

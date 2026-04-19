@@ -5,16 +5,19 @@
 
 import {
   effectiveChartedTemp,
+  findMostRecentCd1AnchorFromBleedingLogs,
   thresholdDelta,
   type DailyFertilityInput,
   type FertileWindowAlgorithmResult,
+  type ManualLogs,
   type TemperatureUnitForAlgo,
 } from '@/src/lib/algorithms';
+import { addCalendarDays, isoDateString, parseIsoDate } from '@/src/lib/dateDisplay';
 import {
   SCORE_ATTRIBUTION_SYMPTOTHERMAL,
   SCORE_ATTRIBUTION_WEARABLES,
 } from '@/src/lib/cachedInsight';
-import type { TrackingGoal } from '@/src/types/database';
+import type { ManualLogBleeding, TrackingGoal } from '@/src/types/database';
 
 /** Free users stay at or below this cap (passive + thermal) until premium / AI. */
 export const FREE_TIER_LOCAL_SCORE_CAP = 75;
@@ -26,6 +29,10 @@ export type LocalBioScoreResult = {
   score_basis: ScoreBasis;
   /** Prepended to the rules narrative in `cached_insight`. */
   scoreAttributionLine: string;
+  /** True when user is not premium — UI may upsell for full confidence range. */
+  full_confidence_requires_premium?: boolean;
+  /** True when free tier or limited-data cap was applied (70 direct / 30 floor for avoid raw). */
+  confidence_cap_applied?: boolean;
 };
 
 const MUCUS_LOOKBACK_DAYS = 14;
@@ -34,6 +41,36 @@ const MIN_POINTS_FOR_AVG = 4;
 
 function sortAsc(series: DailyFertilityInput[]): DailyFertilityInput[] {
   return [...series].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * Freemium / statistical-detective: cap confidence at 70% direct read, or avoid raw floor 30
+ * (UI calm = 100 − raw, so calm never exceeds 70 when capped).
+ */
+function buildFinalLocalResult(
+  rawConceptionScore: number,
+  trackingGoal: TrackingGoal,
+  isPremium: boolean,
+  isLimitedData: boolean,
+  rest: { score_basis: ScoreBasis; scoreAttributionLine: string },
+): LocalBioScoreResult {
+  const requiresCap = !isPremium || isLimitedData;
+  let s = Math.round(Number(rawConceptionScore));
+  if (!Number.isFinite(s)) s = 44;
+  s = Math.max(0, Math.min(100, s));
+  if (requiresCap) {
+    if (trackingGoal === 'avoid') {
+      s = Math.max(30, s);
+    } else {
+      s = Math.min(70, s);
+    }
+  }
+  return {
+    fertility_score: s,
+    full_confidence_requires_premium: !isPremium ? true : undefined,
+    confidence_cap_applied: requiresCap ? true : undefined,
+    ...rest,
+  };
 }
 
 function hasRecentCervicalMucus(seriesAsc: DailyFertilityInput[]): boolean {
@@ -95,40 +132,204 @@ function bbtStillAtFollicularBaseline(
   return Math.abs(latest - med) <= tol;
 }
 
+function bleedingManualLogsFromSeries(seriesAsc: DailyFertilityInput[]): ManualLogs[] {
+  const byDate = new Map<string, ManualLogBleeding | null>();
+  for (const r of seriesAsc) {
+    if (r.bleeding != null && String(r.bleeding).trim() !== '') {
+      byDate.set(r.date, String(r.bleeding) as ManualLogBleeding);
+    }
+  }
+  return [...byDate.entries()]
+    .map(([date, bleeding]) => ({ date, bleeding }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function cycleDayFromCd1(cd1Iso: string, todayIso: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(cd1Iso) || !/^\d{4}-\d{2}-\d{2}$/.test(todayIso)) return null;
+  if (todayIso < cd1Iso) return null;
+  let cd = 1;
+  let cur = cd1Iso;
+  while (cur < todayIso) {
+    cd += 1;
+    cur = isoDateString(addCalendarDays(parseIsoDate(cur), 1));
+  }
+  return cd;
+}
+
+function baseRiskFromCycleDay(cd: number | null): number {
+  if (cd == null) return 85;
+  if (cd >= 1 && cd <= 5) return 20;
+  if (cd >= 6 && cd <= 7) return 60;
+  if (cd >= 8 && cd <= 18) return 85;
+  return 40;
+}
+
+/** Strict 3-over-6 on logged charted BBT (consecutive calendar days with temps); uses `thresholdDelta` unit. */
+function strictSensiplanThreeOverSixLoggedBbt(
+  seriesAsc: DailyFertilityInput[],
+  temperatureUnit: TemperatureUnitForAlgo,
+): boolean {
+  const charted: { date: string; t: number }[] = [];
+  for (const r of seriesAsc) {
+    const t = effectiveChartedTemp(r);
+    if (t != null && Number.isFinite(t)) charted.push({ date: r.date, t });
+  }
+  charted.sort((a, b) => a.date.localeCompare(b.date));
+  const byDate = new Map<string, number>();
+  for (const c of charted) {
+    byDate.set(c.date, c.t);
+  }
+  const dNeed = thresholdDelta(temperatureUnit);
+
+  for (let i = charted.length - 3; i >= 0; i -= 1) {
+    const a = charted[i]!;
+    const b = charted[i + 1]!;
+    const c = charted[i + 2]!;
+    const bExpect = isoDateString(addCalendarDays(parseIsoDate(a.date), 1));
+    const cExpect = isoDateString(addCalendarDays(parseIsoDate(b.date), 1));
+    if (b.date !== bExpect || c.date !== cExpect) continue;
+
+    const priorTemps: number[] = [];
+    let walk = isoDateString(addCalendarDays(parseIsoDate(a.date), -1));
+    for (let guard = 0; guard < 400 && priorTemps.length < 6; guard += 1) {
+      const tv = byDate.get(walk);
+      if (tv != null && Number.isFinite(tv)) priorTemps.push(tv);
+      walk = isoDateString(addCalendarDays(parseIsoDate(walk), -1));
+    }
+    if (priorTemps.length < 6) continue;
+    const m = Math.max(...priorTemps);
+    if (a.t >= m + dNeed && b.t >= m + dNeed && c.t >= m + dNeed) return true;
+  }
+  return false;
+}
+
+function meanOfFinite(nums: number[]): number | null {
+  if (nums.length === 0) return null;
+  return nums.reduce((s, n) => s + n, 0) / nums.length;
+}
+
+function rollingBaselineAndLatest(
+  seriesAsc: DailyFertilityInput[],
+  currentIso: string,
+  getter: (r: DailyFertilityInput) => number | null | undefined,
+): { baseline: number | null; latest: number | null } {
+  const windowStartIso = isoDateString(addCalendarDays(parseIsoDate(currentIso), -14));
+  const vals: number[] = [];
+  for (const r of seriesAsc) {
+    if (r.date < windowStartIso || r.date >= currentIso) continue;
+    const v = getter(r);
+    if (v != null && Number.isFinite(v)) vals.push(Number(v));
+  }
+  const baseline = meanOfFinite(vals);
+  const curRow = seriesAsc.find((r) => r.date === currentIso);
+  const lv = curRow ? getter(curRow) : null;
+  const latest = lv != null && Number.isFinite(lv) ? Number(lv) : null;
+  return { baseline, latest };
+}
+
+/**
+ * Avoid goal: raw pregnancy-risk score (higher = higher risk). UI continues to show `100 - score` as calm.
+ * Calendar CD bands + HRV/RHR/RR early warning vs 14d baseline; BBT 3-over-6 closes window → raw 10.
+ */
+function calculateAvoidTunedLocalBioScore(
+  seriesAsc: DailyFertilityInput[],
+  temperatureUnit: TemperatureUnitForAlgo,
+  isPremium: boolean,
+  isLimitedData: boolean,
+): LocalBioScoreResult {
+  if (strictSensiplanThreeOverSixLoggedBbt(seriesAsc, temperatureUnit)) {
+    return buildFinalLocalResult(10, 'avoid', isPremium, isLimitedData, {
+      score_basis: 'symptothermal',
+      scoreAttributionLine: SCORE_ATTRIBUTION_SYMPTOTHERMAL,
+    });
+  }
+
+  const todayIso =
+    seriesAsc.length > 0 ? seriesAsc[seriesAsc.length - 1]!.date : isoDateString(new Date());
+  const logs = bleedingManualLogsFromSeries(seriesAsc);
+  const cd1 = findMostRecentCd1AnchorFromBleedingLogs(logs, null);
+  const cd = cd1 ? cycleDayFromCd1(cd1, todayIso) : null;
+  const baseRisk = baseRiskFromCycleDay(cd);
+
+  let hrvPenalty = 0;
+  let rhrPenalty = 0;
+  let rrPenalty = 0;
+
+  const h = rollingBaselineAndLatest(seriesAsc, todayIso, (r) => r.hrv);
+  if (h.baseline != null && h.latest != null && Number.isFinite(h.baseline)) {
+    const deltaHrv = h.latest - h.baseline;
+    if (deltaHrv < -3) hrvPenalty = 15;
+  }
+
+  const rh = rollingBaselineAndLatest(seriesAsc, todayIso, (r) => r.rhr);
+  if (rh.baseline != null && rh.latest != null && Number.isFinite(rh.baseline)) {
+    const deltaRhr = rh.latest - rh.baseline;
+    if (deltaRhr > 2) rhrPenalty = 10;
+  }
+
+  const rr = rollingBaselineAndLatest(seriesAsc, todayIso, (r) => r.respiratory_rate);
+  if (rr.baseline != null && rr.latest != null && Number.isFinite(rr.baseline)) {
+    const deltaRr = rr.latest - rr.baseline;
+    if (deltaRr > 0.5) rrPenalty = 5;
+  }
+
+  const raw = Math.min(100, baseRisk + hrvPenalty + rhrPenalty + rrPenalty);
+
+  return buildFinalLocalResult(raw, 'avoid', isPremium, isLimitedData, {
+    score_basis: 'wearables',
+    scoreAttributionLine: SCORE_ATTRIBUTION_WEARABLES,
+  });
+}
+
 /**
  * Passive proxy when recent manual mucus is absent: RHR / HRV vs 7-day means, synced vitals, goal weights.
- * Always caps free-tier output at {@link FREE_TIER_LOCAL_SCORE_CAP}.
+ * Always caps free-tier output at {@link FREE_TIER_LOCAL_SCORE_CAP} (except avoid uses its own cap at 100).
  */
 export function calculateLocalBioScore(args: {
   dailySeriesAsc: DailyFertilityInput[];
   temperatureUnit: TemperatureUnitForAlgo;
   thermal: FertileWindowAlgorithmResult;
   trackingGoal: TrackingGoal;
+  isPremium: boolean;
+  isLimitedData: boolean;
 }): LocalBioScoreResult {
-  const { temperatureUnit, thermal, trackingGoal } = args;
+  const { temperatureUnit, thermal, trackingGoal, isPremium, isLimitedData } = args;
   const seriesAsc = sortAsc(args.dailySeriesAsc);
+
+  if (trackingGoal === 'avoid') {
+    return calculateAvoidTunedLocalBioScore(seriesAsc, temperatureUnit, isPremium, isLimitedData);
+  }
 
   let score = Math.round(Number(thermal.fertility_score));
   if (!Number.isFinite(score)) score = 44;
 
   if (hasRecentCervicalMucus(seriesAsc)) {
-    return {
-      fertility_score: Math.min(FREE_TIER_LOCAL_SCORE_CAP, score),
-      score_basis: 'symptothermal',
-      scoreAttributionLine: SCORE_ATTRIBUTION_SYMPTOTHERMAL,
-    };
+    return buildFinalLocalResult(
+      Math.min(FREE_TIER_LOCAL_SCORE_CAP, score),
+      trackingGoal,
+      isPremium,
+      isLimitedData,
+      {
+        score_basis: 'symptothermal',
+        scoreAttributionLine: SCORE_ATTRIBUTION_SYMPTOTHERMAL,
+      },
+    );
   }
 
-  const passiveScale =
-    trackingGoal === 'conceive' ? 1 : trackingGoal === 'avoid' ? 1 : 0.55;
+  const passiveScale = trackingGoal === 'conceive' ? 1 : 0.55;
 
   const i = lastVitalsIndex(seriesAsc);
   if (i < ROLLING_DAYS) {
-    return {
-      fertility_score: Math.min(FREE_TIER_LOCAL_SCORE_CAP, score),
-      score_basis: 'wearables',
-      scoreAttributionLine: SCORE_ATTRIBUTION_WEARABLES,
-    };
+    return buildFinalLocalResult(
+      Math.min(FREE_TIER_LOCAL_SCORE_CAP, score),
+      trackingGoal,
+      isPremium,
+      isLimitedData,
+      {
+        score_basis: 'wearables',
+        scoreAttributionLine: SCORE_ATTRIBUTION_WEARABLES,
+      },
+    );
   }
 
   const prior7 = windowPrior(seriesAsc, i, ROLLING_DAYS);
@@ -146,18 +347,12 @@ export function calculateLocalBioScore(args: {
     latestRhr > prevRhrAvg + 2 &&
     bbtStillAtFollicularBaseline(seriesAsc, i, temperatureUnit, thermal)
   ) {
-    const bump =
-      trackingGoal === 'conceive'
-        ? 12
-        : trackingGoal === 'avoid'
-          ? 6
-          : 7;
-    score += Math.round(bump * passiveScale);
+    score += Math.round(12 * passiveScale);
   }
 
   // HRV dip >10% under trailing mean — estrogen / autonomic stress proxy when mucus is missing.
   if (hrvAvg != null && hrvAvg > 0 && latestHrv != null && Number.isFinite(latestHrv) && latestHrv < hrvAvg * 0.9) {
-    const bump = trackingGoal === 'avoid' ? 14 : trackingGoal === 'conceive' ? 12 : 7;
+    const bump = trackingGoal === 'conceive' ? 12 : 7;
     score += Math.round(bump * passiveScale);
   }
 
@@ -180,12 +375,6 @@ export function calculateLocalBioScore(args: {
     }
   }
 
-  // Avoid: sustained thermal shift (3-over-6 path) is the safety anchor — pull score down when shift is firm.
-  if (trackingGoal === 'avoid' && thermal.estimated_ovulation_date != null) {
-    const strong = thermal.is_estimate === false && thermal.fertility_score >= 70;
-    score -= strong ? 18 : 10;
-  }
-
   // Conceive: modest lift when thermal already found ovulation timing.
   if (trackingGoal === 'conceive' && thermal.estimated_ovulation_date != null) {
     score += 4;
@@ -193,9 +382,8 @@ export function calculateLocalBioScore(args: {
 
   score = Math.max(0, Math.min(FREE_TIER_LOCAL_SCORE_CAP, Math.round(score)));
 
-  return {
-    fertility_score: score,
+  return buildFinalLocalResult(score, trackingGoal, isPremium, isLimitedData, {
     score_basis: 'wearables',
     scoreAttributionLine: SCORE_ATTRIBUTION_WEARABLES,
-  };
+  });
 }

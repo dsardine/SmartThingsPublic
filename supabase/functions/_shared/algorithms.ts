@@ -16,6 +16,10 @@ export type DailyFertilityInput = {
   exclude_temp?: boolean | null;
   disturbances?: string[] | null;
   cervical_fluid?: string | null;
+  /** Menstrual flow from `manual_logs` (e.g. Light/Medium/Heavy); used for avoid-tuned cycle-day risk. */
+  bleeding?: string | null;
+  /** Wearable respiratory rate (e.g. breaths/min) when present. */
+  respiratory_rate?: number | null;
 };
 
 export type FertileWindowAlgorithmResult = {

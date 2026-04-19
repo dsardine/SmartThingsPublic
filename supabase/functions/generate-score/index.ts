@@ -46,6 +46,8 @@ type UnifiedScore = {
   score_basis?: ScoreBasis;
   /** True when only menstrual/bleeding logs exist (no BBT, no wearable biometrics). */
   statistical_period_only?: boolean;
+  full_confidence_requires_premium?: boolean;
+  confidence_cap_applied?: boolean;
 };
 
 function num(row: Record<string, unknown>, keys: string[]): number | null {
@@ -166,6 +168,12 @@ function toStoredInsightText(u: UnifiedScore): string {
   if (u.statistical_period_only === true) {
     payload.statistical_period_only = true;
   }
+  if (u.full_confidence_requires_premium === true) {
+    payload.full_confidence_requires_premium = true;
+  }
+  if (u.confidence_cap_applied === true) {
+    payload.confidence_cap_applied = true;
+  }
   return JSON.stringify(payload);
 }
 
@@ -181,12 +189,42 @@ function rulesResultToUnified(r: FertileWindowAlgorithmResult): UnifiedScore {
   };
 }
 
+function applyConfidenceCapToUnified(
+  u: UnifiedScore,
+  trackingGoal: LocalTrackingGoal,
+  isPremium: boolean,
+  isLimitedData: boolean,
+): UnifiedScore {
+  const requiresCap = !isPremium || isLimitedData;
+  if (!requiresCap) {
+    return {
+      ...u,
+      full_confidence_requires_premium: undefined,
+      confidence_cap_applied: undefined,
+    };
+  }
+  let s = clampScore(u.fertility_score);
+  if (trackingGoal === "avoid") {
+    s = Math.max(30, s);
+  } else {
+    s = Math.min(70, s);
+  }
+  return {
+    ...u,
+    fertility_score: s,
+    full_confidence_requires_premium: !isPremium ? true : undefined,
+    confidence_cap_applied: true,
+  };
+}
+
 function computeFreeTierUnified(
   dailySeries: DailyFertilityInput[],
   temperatureUnit: TemperatureUnitForAlgo,
   profileFallback: ProfileCycleIntake | null,
   clinicalState: ClinicalState,
   trackingGoal: LocalTrackingGoal,
+  isPremium: boolean,
+  isLimitedData: boolean,
 ): UnifiedScore {
   const algo = calculateFertileWindow(
     dailySeries,
@@ -199,6 +237,8 @@ function computeFreeTierUnified(
     temperatureUnit,
     thermal: algo,
     trackingGoal,
+    isPremium,
+    isLimitedData,
   });
   const rules = rulesResultToUnified(algo);
   return {
@@ -206,6 +246,8 @@ function computeFreeTierUnified(
     fertility_score: local.fertility_score,
     ai_narrative: `${local.scoreAttributionLine}\n\n${algo.ai_narrative}`,
     score_basis: local.score_basis,
+    full_confidence_requires_premium: local.full_confidence_requires_premium,
+    confidence_cap_applied: local.confidence_cap_applied,
   };
 }
 
@@ -253,7 +295,7 @@ async function loadDailySeries(
 ): Promise<DailyFertilityInput[]> {
   const { data: bio, error: bioErr } = await admin
     .from("biometrics")
-    .select("date, sleeping_temp, rhr, hrv, created_at")
+    .select("date, sleeping_temp, rhr, hrv, respiratory_rate, created_at")
     .eq("user_id", userId)
     .order("date", { ascending: true })
     .limit(200);
@@ -264,7 +306,7 @@ async function loadDailySeries(
 
   const { data: logs, error: logsErr } = await admin
     .from("manual_logs")
-    .select("date, manual_bbt, exclude_temp, disturbances, cervical_fluid")
+    .select("date, manual_bbt, exclude_temp, disturbances, cervical_fluid, bleeding")
     .eq("user_id", userId)
     .order("date", { ascending: true })
     .limit(200);
@@ -283,6 +325,9 @@ async function loadDailySeries(
     if (r.sleeping_temp != null) cur.sleeping_temp = Number(r.sleeping_temp);
     if (r.rhr != null) cur.rhr = Number(r.rhr);
     if (r.hrv != null && Number.isFinite(Number(r.hrv))) cur.hrv = Number(r.hrv);
+    if (r.respiratory_rate != null && Number.isFinite(Number(r.respiratory_rate))) {
+      cur.respiratory_rate = Number(r.respiratory_rate);
+    }
     byDate.set(d, cur);
   }
 
@@ -300,6 +345,10 @@ async function loadDailySeries(
     const cf = r.cervical_fluid;
     if (cf != null && String(cf).trim() !== "") {
       cur.cervical_fluid = String(cf);
+    }
+    const bl = r.bleeding;
+    if (bl != null && String(bl).trim() !== "") {
+      cur.bleeding = String(bl);
     }
     byDate.set(d, cur);
   }
@@ -629,6 +678,8 @@ Deno.serve(async (req: Request) => {
       profileFallback,
       clinicalState,
       trackingGoal,
+      userTier === "premium",
+      periodOnly,
     );
   } else {
     try {
@@ -758,6 +809,7 @@ ${jsonFooter}`) + statGemSuffix;
 
     unified = parseGeminiUnified(rawText);
     unified.is_estimate = scoreContext.data_quality === "missing_recent_biometrics";
+    unified = applyConfidenceCapToUnified(unified, trackingGoal, userTier === "premium", periodOnly);
     } catch (e) {
       console.warn("generate-score: Gemini failed, falling back to local/rules:", e);
       unified = computeFreeTierUnified(
@@ -766,6 +818,8 @@ ${jsonFooter}`) + statGemSuffix;
         profileFallback,
         clinicalState,
         trackingGoal,
+        userTier === "premium",
+        periodOnly,
       );
     }
   }
