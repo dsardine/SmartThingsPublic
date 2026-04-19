@@ -205,8 +205,8 @@ export default function MenuScreen() {
       Alert.alert(
         'Import complete',
         result.daysTouched === 0
-          ? 'No new BBT or period flow records were found in that range.'
-          : `Updated ${result.daysTouched} calendar day(s). Your cycle estimate was refreshed from bleeding history.`,
+          ? 'No new Health Connect data was found in that range (or every field was already filled in Sardine).'
+          : `Updated ${result.daysTouched} calendar day(s) across your manual log and/or nightly biometrics. Your cycle estimate was refreshed when new bleeding data was merged.`,
       );
     } finally {
       setHcImportBusy(false);
