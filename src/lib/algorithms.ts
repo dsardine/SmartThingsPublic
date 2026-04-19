@@ -138,6 +138,34 @@ export function calculateDynamicCycleAverage(
 }
 
 /**
+ * Latest CD1 from bleeding logs, else valid `intakeLmpFallback`.
+ * SYNC with `supabase/functions/_shared/algorithms.ts` `findMostRecentCd1AnchorFromBleedingLogs`.
+ */
+export function findMostRecentCd1AnchorFromBleedingLogs(
+  manualLogs: ManualLogs[],
+  intakeLmpFallback: string | null,
+): string | null {
+  const merged = mergeManualLogsByDateChronological(manualLogs);
+  const byDate = new Map<string, ManualLogBleeding | null>();
+  for (const row of merged) {
+    byDate.set(row.date, row.bleeding);
+  }
+  const sortedDates = [...byDate.keys()].sort((a, b) => a.localeCompare(b));
+  const cd1s: string[] = [];
+  for (const date of sortedDates) {
+    const bleeding = byDate.get(date) ?? null;
+    if (!isFlowBleedingForCd1(bleeding)) continue;
+    const prev = calendarDayBefore(date);
+    const prevBleed = byDate.get(prev) ?? null;
+    if (isFlowBleedingForCd1(prevBleed)) continue;
+    cd1s.push(date);
+  }
+  if (cd1s.length > 0) return cd1s[cd1s.length - 1]!;
+  if (intakeLmpFallback && /^\d{4}-\d{2}-\d{2}$/.test(intakeLmpFallback)) return intakeLmpFallback;
+  return null;
+}
+
+/**
  * Chart / thermal-rule temperature: `manual_bbt` first, else `sleeping_temp`.
  * When `exclude_temp` is true (disturbed day), returns null so coverlines and 3-over-6 ignore both sources.
  */

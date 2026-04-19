@@ -1,10 +1,13 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import {
+  addCalendarDaysIso,
   calculateFertileWindow,
   type ClinicalState,
   type DailyFertilityInput,
   type FertileWindowAlgorithmResult,
+  findMostRecentCd1AnchorFromBleedingLogs,
+  type ManualLogs,
   type ProfileCycleIntake,
   type TemperatureUnitForAlgo,
 } from "../_shared/algorithms.ts";
@@ -304,6 +307,36 @@ async function loadDailySeries(
   return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
 
+function utcCalendarIsoToday(): string {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(
+    d.getUTCDate(),
+  ).padStart(2, "0")}`;
+}
+
+async function loadBleedingManualLogsForCd1(
+  admin: ReturnType<typeof createClient>,
+  userId: string,
+): Promise<ManualLogs[]> {
+  const minIso = addCalendarDaysIso(utcCalendarIsoToday(), -730);
+  const { data, error } = await admin
+    .from("manual_logs")
+    .select("date, bleeding")
+    .eq("user_id", userId)
+    .gte("date", minIso)
+    .order("date", { ascending: true });
+  if (error || !data) return [];
+  const out: ManualLogs[] = [];
+  for (const r of data) {
+    const row = r as Record<string, unknown>;
+    out.push({
+      date: String(row.date),
+      bleeding: row.bleeding == null ? null : String(row.bleeding),
+    });
+  }
+  return out;
+}
+
 function seriesHasAnyBbt(series: DailyFertilityInput[]): boolean {
   return series.some((d) => d.manual_bbt != null && Number.isFinite(Number(d.manual_bbt)));
 }
@@ -481,6 +514,22 @@ Deno.serve(async (req: Request) => {
       last_period_date: prof.last_period_date,
       cycle_length_avg: clNum,
     };
+  }
+
+  if (profileFallback == null && Number.isFinite(clNum)) {
+    const clRounded = Math.round(Number(clNum));
+    if (clRounded >= 21 && clRounded <= 50) {
+      const bleedLogs = await loadBleedingManualLogsForCd1(admin, user.id);
+      const intakeLmp =
+        typeof prof.last_period_date === "string" &&
+        /^\d{4}-\d{2}-\d{2}$/.test(prof.last_period_date)
+          ? prof.last_period_date
+          : null;
+      const cd1 = findMostRecentCd1AnchorFromBleedingLogs(bleedLogs, intakeLmp);
+      if (cd1) {
+        profileFallback = { last_period_date: cd1, cycle_length_avg: clRounded };
+      }
+    }
   }
 
   const rawGoal = prof?.tracking_goal;

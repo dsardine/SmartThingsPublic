@@ -12,6 +12,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import type { RealtimeChannel } from '@supabase/supabase-js';
+import { useFocusEffect } from '@react-navigation/native';
 import { type Href, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -32,8 +33,13 @@ import {
   healthKitHasAllReadPermissions,
 } from '@/src/lib/healthKitIOS';
 import { appStorage } from '@/src/lib/storage';
+import { fetchPeriodCountdownAnchorIso } from '@/src/lib/periodCd1Anchor';
 import { formatNextPeriodCountdown } from '@/src/lib/periodCountdown';
 import { FunctionsHttpError } from '@supabase/supabase-js';
+import {
+  isEdgeFunctionNotFoundMessage,
+  runLocalGenerateScoreFallback,
+} from '@/src/lib/localGenerateScoreFallback';
 import { supabase } from '@/src/lib/supabase';
 import { useAppStore } from '@/src/store';
 import { colors } from '@/src/styles/theme';
@@ -117,6 +123,8 @@ export default function FertilityDashboardScreen() {
   const [loading, setLoading] = useState(false);
   const [score, setScore] = useState<ScoreResult | null>(null);
   const [estimatedOvulation, setEstimatedOvulation] = useState<string | null>(null);
+  /** CD1 from calendar bleeding + profile LMP (same rules as calendar), not profile-only. */
+  const [trackOnlyCountdownAnchorIso, setTrackOnlyCountdownAnchorIso] = useState<string | null>(null);
   const pendingInsightChannel = useRef<RealtimeChannel | null>(null);
 
   useEffect(() => {
@@ -234,6 +242,28 @@ export default function FertilityDashboardScreen() {
     void loadCachedScore();
   }, [loadCachedScore, clinicalState]);
 
+  const reloadTrackOnlyCountdownAnchor = useCallback(async () => {
+    if (clinicalState !== 'cycling' || trackingGoal !== 'track_only') {
+      setTrackOnlyCountdownAnchorIso(null);
+      return;
+    }
+    try {
+      setTrackOnlyCountdownAnchorIso(await fetchPeriodCountdownAnchorIso(isGhostModeEnabled));
+    } catch {
+      setTrackOnlyCountdownAnchorIso(null);
+    }
+  }, [clinicalState, trackingGoal, isGhostModeEnabled]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void reloadTrackOnlyCountdownAnchor();
+    }, [reloadTrackOnlyCountdownAnchor]),
+  );
+
+  useEffect(() => {
+    void reloadTrackOnlyCountdownAnchor();
+  }, [reloadTrackOnlyCountdownAnchor, lastPeriodDateIso, cycleLengthAvg]);
+
   const checkMyScore = useCallback(async () => {
     try {
       const {
@@ -324,11 +354,10 @@ export default function FertilityDashboardScreen() {
       });
 
       if (fnError) {
-        pendingInsightChannel.current = null;
-        supabase.removeChannel(channel);
-        setLoading(false);
         let detail = fnError.message;
+        let httpStatus: number | undefined;
         if (fnError instanceof FunctionsHttpError) {
+          httpStatus = fnError.context.status;
           try {
             const raw = await fnError.context.clone().text();
             if (raw) {
@@ -351,6 +380,22 @@ export default function FertilityDashboardScreen() {
             /* keep fnError.message */
           }
         }
+
+        if (isEdgeFunctionNotFoundMessage(detail, httpStatus)) {
+          const fb = await runLocalGenerateScoreFallback();
+          if (fb.ok) {
+            await loadCachedScore();
+            setLoading(false);
+            pendingInsightChannel.current = null;
+            supabase.removeChannel(channel);
+            return;
+          }
+          detail = `${detail}\n\nCould not compute score offline: ${fb.reason}\n\nDeploy the edge function: supabase functions deploy generate-score`;
+        }
+
+        pendingInsightChannel.current = null;
+        supabase.removeChannel(channel);
+        setLoading(false);
         Alert.alert('Score', detail);
         return;
       }
@@ -502,8 +547,8 @@ export default function FertilityDashboardScreen() {
     clinicalState === 'cycling' && trackingGoal === 'track_only';
 
   const countdownLabel = useMemo(
-    () => formatNextPeriodCountdown(lastPeriodDateIso, cycleLengthAvg),
-    [lastPeriodDateIso, cycleLengthAvg],
+    () => formatNextPeriodCountdown(trackOnlyCountdownAnchorIso, cycleLengthAvg),
+    [trackOnlyCountdownAnchorIso, cycleLengthAvg],
   );
 
   return (

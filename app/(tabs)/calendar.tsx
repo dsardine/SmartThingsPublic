@@ -26,6 +26,12 @@ import {
   parseIsoDate,
 } from '@/src/lib/dateDisplay';
 import {
+  type BleedingRow,
+  fetchPeriodCountdownAnchorIso,
+  findMostRecentCd1AnchorFromBleedingRows,
+  isLoggedMenstrualFlow,
+} from '@/src/lib/periodCd1Anchor';
+import {
   collectGhostManualLogsForCycleAverage,
   GHOST_MANUAL_KEY_PREFIX,
 } from '@/src/lib/manualGhostMerge';
@@ -49,11 +55,6 @@ import type {
 } from '@/src/types/database';
 
 const BLEEDING_OPTS: ManualLogBleeding[] = ['Spotting', 'Light', 'Medium', 'Heavy'];
-
-/** Logged menstrual flow for period-end UI and inferred fill (excludes Spotting). */
-function isLoggedMenstrualFlow(b: ManualLogBleeding | null): b is 'Light' | 'Medium' | 'Heavy' {
-  return b === 'Light' || b === 'Medium' || b === 'Heavy';
-}
 
 function isoInMonthCursor(iso: string, monthCursor: Date): boolean {
   const d = parseIsoDate(iso);
@@ -90,42 +91,6 @@ function mergeOnboardingLmpIntoMarkers(
     byDate.set(lmpIso, { date: lmpIso, bleeding: 'Light', period_end: false });
   }
   return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
-}
-
-type BleedingRow = { date: string; bleeding: ManualLogBleeding | null };
-
-function mergeBleedingByDateLastWins(rows: BleedingRow[]): Map<string, ManualLogBleeding | null> {
-  const sorted = [...rows].sort((a, b) => a.date.localeCompare(b.date));
-  const map = new Map<string, ManualLogBleeding | null>();
-  for (const r of sorted) {
-    map.set(r.date, r.bleeding);
-  }
-  return map;
-}
-
-/**
- * Latest CD1: Light/Medium/Heavy when the prior calendar day is not Light/Medium/Heavy
- * (Spotting and missing days are treated like null for the prior-day check).
- * If none, uses onboarding `last_period_date` when provided.
- */
-function findMostRecentCd1AnchorFromBleedingRows(
-  rows: BleedingRow[],
-  intakeLmpFallback: string | null,
-): string | null {
-  const byDate = mergeBleedingByDateLastWins(rows);
-  const sortedDates = [...byDate.keys()].sort((a, b) => a.localeCompare(b));
-  const cd1s: string[] = [];
-  for (const date of sortedDates) {
-    const bleeding = byDate.get(date) ?? null;
-    if (!isLoggedMenstrualFlow(bleeding)) continue;
-    const prev = isoDateString(addCalendarDays(parseIsoDate(date), -1));
-    const prevBleed = byDate.get(prev) ?? null;
-    if (isLoggedMenstrualFlow(prevBleed)) continue;
-    cd1s.push(date);
-  }
-  if (cd1s.length > 0) return cd1s[cd1s.length - 1]!;
-  if (intakeLmpFallback && /^\d{4}-\d{2}-\d{2}$/.test(intakeLmpFallback)) return intakeLmpFallback;
-  return null;
 }
 
 /** Estimated next period start through the following four days (5 days). */
@@ -498,21 +463,10 @@ export default function CalendarScreen() {
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle(),
-      supabase
-        .from('profiles')
-        .select(
-          'last_period_date, cycle_length_avg, onboarding_completed, clinical_state',
-        )
-        .eq('id', user.id)
-        .maybeSingle(),
+      supabase.from('profiles').select('clinical_state').eq('id', user.id).maybeSingle(),
     ]);
 
-    const pr = profileRow as {
-      last_period_date?: string | null;
-      cycle_length_avg?: number | null;
-      onboarding_completed?: boolean | null;
-      clinical_state?: string | null;
-    } | null;
+    const pr = profileRow as { clinical_state?: string | null } | null;
 
     const profileCs = (pr?.clinical_state as ClinicalState | null | undefined) ?? null;
     const algorithmsActive = (profileCs ?? 'cycling') === 'cycling';
@@ -535,10 +489,12 @@ export default function CalendarScreen() {
       return;
     }
 
-    if (pr?.onboarding_completed === true && typeof pr.last_period_date === 'string') {
+    /** CD1 from profile LMP and/or calendar bleeding (same anchor as period countdown / predicted strip). */
+    const cd1Iso = await fetchPeriodCountdownAnchorIso(useAppStore.getState().isGhostModeEnabled);
+    if (cd1Iso) {
       const cycleAvg = useAppStore.getState().cycleLengthAvg;
       const est = estimatedOvulationFromProfileIntake({
-        last_period_date: pr.last_period_date,
+        last_period_date: cd1Iso,
         cycle_length_avg: cycleAvg,
       });
       if (est) {

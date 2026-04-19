@@ -118,7 +118,7 @@ export function calculateDynamicCycleAverage(
   return Math.round(mean);
 }
 
-function addCalendarDaysIso(iso: string, days: number): string {
+export function addCalendarDaysIso(iso: string, days: number): string {
   const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return iso;
   const y = Number(m[1]);
@@ -130,6 +130,34 @@ function addCalendarDaysIso(iso: string, days: number): string {
   const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(dt.getUTCDate()).padStart(2, "0");
   return `${yy}-${mm}-${dd}`;
+}
+
+/**
+ * Latest CD1 from bleeding logs, else `intakeLmpFallback` when valid ISO.
+ * SYNC with app `findMostRecentCd1AnchorFromBleedingRows` in `src/lib/periodCd1Anchor.ts`.
+ */
+export function findMostRecentCd1AnchorFromBleedingLogs(
+  manualLogs: ManualLogs[],
+  intakeLmpFallback: string | null,
+): string | null {
+  const merged = mergeManualLogsByDateChronological(manualLogs);
+  const byDate = new Map<string, string | null>();
+  for (const row of merged) {
+    byDate.set(row.date, row.bleeding);
+  }
+  const sortedDates = [...byDate.keys()].sort((a, b) => a.localeCompare(b));
+  const cd1s: string[] = [];
+  for (const date of sortedDates) {
+    const bleeding = byDate.get(date) ?? null;
+    if (!isFlowBleedingForCd1(bleeding)) continue;
+    const prev = addCalendarDaysIso(date, -1);
+    const prevBleed = byDate.get(prev) ?? null;
+    if (isFlowBleedingForCd1(prevBleed)) continue;
+    cd1s.push(date);
+  }
+  if (cd1s.length > 0) return cd1s[cd1s.length - 1]!;
+  if (intakeLmpFallback && /^\d{4}-\d{2}-\d{2}$/.test(intakeLmpFallback)) return intakeLmpFallback;
+  return null;
 }
 
 export function estimatedOvulationFromProfileIntake(intake: ProfileCycleIntake): string | null {

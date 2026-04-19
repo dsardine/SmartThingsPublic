@@ -73,6 +73,30 @@ export function parseInsightText(insightText: string): ParsedInsight {
   };
 }
 
+/** JSON stored in `cached_insight.insight_text` — mirrors edge `toStoredInsightText`. */
+export function buildCachedInsightText(args: {
+  narrative: string;
+  estimatedOvulationDate: string | null;
+  isImplantationDip: boolean;
+  isTriphasic: boolean;
+  clinicalEnginePaused?: boolean;
+  scoreBasis?: ScoreBasis | null;
+  statisticalPeriodOnly?: boolean;
+}): string {
+  const payload: Record<string, unknown> = {
+    narrative: args.narrative,
+    is_implantation_dip: args.isImplantationDip,
+    is_triphasic: args.isTriphasic,
+    estimated_ovulation_date: args.estimatedOvulationDate,
+  };
+  if (args.clinicalEnginePaused === true) payload.clinical_engine_paused = true;
+  if (args.scoreBasis === 'wearables' || args.scoreBasis === 'symptothermal') {
+    payload.score_basis = args.scoreBasis;
+  }
+  if (args.statisticalPeriodOnly === true) payload.statistical_period_only = true;
+  return JSON.stringify(payload);
+}
+
 /** Human-readable countdown / offset to an ISO calendar date (YYYY-MM-DD). */
 export function formatDaysToOvulation(isoDate: string | null): string {
   if (isoDate == null || isoDate === '') return '—';

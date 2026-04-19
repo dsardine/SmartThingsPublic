@@ -2,4 +2,7 @@
 project_id = "sardine-app"
 
 [functions.generate-score]
-verify_jwt = true
+# Gateway verifier only supports legacy HS256. Projects using JWT Signing Keys (ES256 via JWKS)
+# fail with "unsupported JWT algorithm ES256" before this function runs. Auth is enforced in
+# `generate-score/index.ts` with `createClient` + `auth.getUser()` on the Bearer token.
+verify_jwt = false
