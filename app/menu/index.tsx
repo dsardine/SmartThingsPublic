@@ -353,13 +353,30 @@ export default function MenuScreen() {
         return;
       }
       setHcImportModalOpen(false);
-      Alert.alert(
-        'Import complete',
+      const successBody =
         result.daysTouched === 0
           ? result.zeroDataNote ??
             'No new Health Connect data was found in that range (or every field was already filled in Sardine).'
-          : `Updated ${result.daysTouched} calendar day(s) across your manual log and/or nightly biometrics. Your cycle estimate was refreshed when new bleeding data was merged.`,
-      );
+          : (() => {
+              const head = `Updated ${result.daysTouched} calendar day(s) across your manual log and/or nightly biometrics.`;
+              const bleed = result.bleedingMergedFromHc ?? 0;
+              const m = result.manualPatchDays ?? 0;
+              const b = result.bioPatchDays ?? 0;
+              if (bleed > 0) {
+                return `${head} Your cycle estimate was refreshed when new bleeding data was merged.`;
+              }
+              if (m > 0 && b > 0) {
+                return `${head} Empty manual and biometrics fields were filled from Health Connect where Sardine did not already have data.`;
+              }
+              if (b > 0) {
+                return `${head} Nightly biometrics were updated where those cells were still empty.`;
+              }
+              if (m > 0) {
+                return `${head} Your manual log was updated where cells were still empty.`;
+              }
+              return `${head} Health Connect data was merged where Sardine had empty fields.`;
+            })();
+      Alert.alert('Import complete', successBody);
     } finally {
       setHcImportBusy(false);
     }

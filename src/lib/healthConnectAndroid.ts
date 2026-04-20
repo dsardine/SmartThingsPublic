@@ -784,7 +784,17 @@ async function mergeHcBiometricsToSupabase(
 }
 
 export type HealthConnectManualSyncResult =
-  | { ok: true; daysTouched: number; zeroDataNote?: string }
+  | {
+      ok: true;
+      daysTouched: number;
+      zeroDataNote?: string;
+      /** Days with HC-derived manual patches (flow/period/BBT), not necessarily written if cells were full. */
+      manualPatchDays?: number;
+      /** Days with nocturnal biometrics patches from HC. */
+      bioPatchDays?: number;
+      /** Cloud sync: days where bleeding was taken from HC into a previously empty manual cell. */
+      bleedingMergedFromHc?: number;
+    }
   | { ok: false; reason: string };
 
 /**
@@ -874,7 +884,12 @@ export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
     }
     await persistDynamicCycleLengthAfterBleedingLog({ isGhost: true, userId: null });
     hcDebug('syncGhostDone', { daysTouched: manualByDate.size });
-    return { ok: true, daysTouched: manualByDate.size };
+    return {
+      ok: true,
+      daysTouched: manualByDate.size,
+      manualPatchDays: manualByDate.size,
+      bioPatchDays: 0,
+    };
   }
 
   const dates = [...manualByDate.keys()].sort((a, b) => a.localeCompare(b));
@@ -897,6 +912,7 @@ export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
     }
   }
 
+  let bleedingMergedFromHc = 0;
   for (const iso of dates) {
     const patch = manualByDate.get(iso)!;
     const existing = existingByDate.get(iso) ?? null;
@@ -917,6 +933,9 @@ export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
           : (existing?.bbt_time_taken as string | null | undefined) ?? null;
 
     const bleeding = hasUserBleed ? (existing!.bleeding as ManualLogBleeding) : patch.bleeding ?? null;
+    if (!hasUserBleed && patch.bleeding != null) {
+      bleedingMergedFromHc += 1;
+    }
 
     const row = {
       user_id: userId!,
@@ -967,7 +986,13 @@ export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
   await persistDynamicCycleLengthAfterBleedingLog({ isGhost: false, userId });
   const touched = new Set<string>([...manualByDate.keys(), ...bioByDate.keys()]);
   hcDebug('syncCloudDone', { daysTouched: touched.size, manualKeys: manualByDate.size, bioKeys: bioByDate.size });
-  return { ok: true, daysTouched: touched.size };
+  return {
+    ok: true,
+    daysTouched: touched.size,
+    manualPatchDays: manualByDate.size,
+    bioPatchDays: bioByDate.size,
+    bleedingMergedFromHc,
+  };
 }
 
 /** Short status line for the menu card. */
