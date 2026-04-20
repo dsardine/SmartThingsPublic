@@ -368,44 +368,92 @@ function localMidnightToTenAm(wakeIso: string): { morningStart: Date; morningEnd
   return { morningStart, morningEnd };
 }
 
-function parseSleepIntervals(sessions: RecordResult<'SleepSession'>[]): SleepInterval[] {
-  const out: SleepInterval[] = [];
-  for (const r of sessions) {
-    const start = new Date(r.startTime);
-    const end = new Date(r.endTime);
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) continue;
-    if (start.getTime() >= end.getTime()) continue;
-    out.push({ start, end });
-  }
-  return out;
+/**
+ * HC `SleepSession` only carries `stages` (sleep vs awake intervals) — not HRV, RR, or skin temp.
+ * Those metrics must come from their own record types when OEMs write them; we still use stages to
+ * tighten **which slice of the session** counts as asleep for sampling when stages exist.
+ */
+function sleepSessionInterval(record: RecordResult<'SleepSession'>): SleepInterval | null {
+  const start = new Date(record.startTime);
+  const end = new Date(record.endTime);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+  if (start.getTime() >= end.getTime()) return null;
+  return { start, end };
 }
 
 /**
  * Sleep sessions that overlap the wake-day morning window [00:00, 10:00) local.
  * Primary: longest duration; tie-break: end closest to 09:00 local (nocturnal vs nap).
  */
-function pickPrimaryNocturnalSleep(
-  sessions: SleepInterval[],
+function pickPrimaryNocturnalSleepSession(
+  sleepRows: RecordResult<'SleepSession'>[],
   wakeIso: string,
-): SleepInterval | null {
+): RecordResult<'SleepSession'> | null {
   const { morningStart, morningEnd } = localMidnightToTenAm(wakeIso);
   const idealWake = parseIsoDate(wakeIso);
   idealWake.setHours(9, 0, 0, 0);
 
-  const candidates = sessions.filter((s) =>
-    intervalsOverlap(s.start, s.end, morningStart, morningEnd),
-  );
+  const candidates: RecordResult<'SleepSession'>[] = [];
+  for (const r of sleepRows) {
+    const iv = sleepSessionInterval(r);
+    if (!iv) continue;
+    if (!intervalsOverlap(iv.start, iv.end, morningStart, morningEnd)) continue;
+    candidates.push(r);
+  }
   if (candidates.length === 0) return null;
 
   candidates.sort((a, b) => {
-    const da = a.end.getTime() - a.start.getTime();
-    const db = b.end.getTime() - b.start.getTime();
+    const ia = sleepSessionInterval(a)!;
+    const ib = sleepSessionInterval(b)!;
+    const da = ia.end.getTime() - ia.start.getTime();
+    const db = ib.end.getTime() - ib.start.getTime();
     if (db !== da) return db - da;
     return (
-      Math.abs(a.end.getTime() - idealWake.getTime()) - Math.abs(b.end.getTime() - idealWake.getTime())
+      Math.abs(ia.end.getTime() - idealWake.getTime()) - Math.abs(ib.end.getTime() - idealWake.getTime())
     );
   });
   return candidates[0] ?? null;
+}
+
+/** AWAKE, OUT_OF_BED, AWAKE_IN_BED (7 on newer Android) — exclude from “asleep” vitals pool. */
+function isSleepStageAwakeLike(stage: number): boolean {
+  return stage === 1 || stage === 3 || stage === 7;
+}
+
+/**
+ * True when `timeIso` falls in `outerBounds` and, if the primary session lists sleep stages, in at
+ * least one non-awake stage segment inside the session. Falls back to `outerBounds` only when
+ * stages are missing or contain no usable asleep intervals.
+ */
+function instantInSleepDerivedSampleWindow(
+  timeIso: string,
+  primarySession: RecordResult<'SleepSession'> | null,
+  outerBounds: SleepInterval,
+): boolean {
+  if (!instantInRange(timeIso, outerBounds)) return false;
+  if (!primarySession?.stages || primarySession.stages.length === 0) {
+    return true;
+  }
+  const iv = sleepSessionInterval(primarySession);
+  if (!iv) return true;
+  const sessionStart = iv.start.getTime();
+  const sessionEnd = iv.end.getTime();
+  const t = new Date(timeIso).getTime();
+  if (Number.isNaN(t)) return false;
+
+  let sawAsleepSegment = false;
+  for (const st of primarySession.stages) {
+    if (isSleepStageAwakeLike(st.stage)) continue;
+    const s0 = Math.max(sessionStart, new Date(st.startTime).getTime());
+    const s1 = Math.min(sessionEnd, new Date(st.endTime).getTime());
+    if (Number.isNaN(s0) || Number.isNaN(s1) || s0 >= s1) continue;
+    sawAsleepSegment = true;
+    if (t >= s0 && t <= s1) return true;
+  }
+  if (!sawAsleepSegment) {
+    return true;
+  }
+  return false;
 }
 
 /** Vitals window: full sleep session if found, else local 00:00–10:00 on the wake day. */
@@ -564,26 +612,28 @@ async function readHealthConnectImportMaps(
     cur.bbtTime = localTimeHHMMSS(r.time);
   }
 
-  const sleepIntervals = parseSleepIntervals(sleepRows);
   const { start: rangeStart, end: rangeEnd } = bioImportLocalDayRange(lookbackDays);
   const wakeIsos = iterateWakeIsoDatesInclusive(rangeStart, rangeEnd);
 
   const bioByDate = new Map<string, HcBioDayPatch>();
   for (const wakeIso of wakeIsos) {
-    const primarySleep = pickPrimaryNocturnalSleep(sleepIntervals, wakeIso);
-    const bounds = bioBoundsForWakeDay(wakeIso, primarySleep);
+    const primarySession = pickPrimaryNocturnalSleepSession(sleepRows, wakeIso);
+    const coarseSleepInterval = primarySession ? sleepSessionInterval(primarySession) : null;
+    const bounds = bioBoundsForWakeDay(wakeIso, coarseSleepInterval);
+    const inBioWindow = (timeIso: string) =>
+      instantInSleepDerivedSampleWindow(timeIso, primarySession, bounds);
 
     /** Wrist/skin (BodyTemperature) and BBT rows both contribute; minimum °C in the sleep window → `sleeping_temp`. */
     const tempsC: number[] = [];
     for (const r of bodyTemps) {
       const tr = r as RecordResult<'BodyTemperature'>;
-      if (!instantInRange(tr.time, bounds)) continue;
+      if (!inBioWindow(tr.time)) continue;
       const c = tr.temperature?.inCelsius;
       if (c != null && Number.isFinite(c)) tempsC.push(c);
     }
     for (const r of bbts) {
       const tr = r as RecordResult<'BasalBodyTemperature'>;
-      if (!instantInRange(tr.time, bounds)) continue;
+      if (!inBioWindow(tr.time)) continue;
       const c = tr.temperature?.inCelsius;
       if (c != null && Number.isFinite(c)) tempsC.push(c);
     }
@@ -594,7 +644,7 @@ async function readHealthConnectImportMaps(
     const rhrSamples: number[] = [];
     for (const r of rhrRows) {
       const tr = r as RecordResult<'RestingHeartRate'>;
-      if (!instantInRange(tr.time, bounds)) continue;
+      if (!inBioWindow(tr.time)) continue;
       if (typeof tr.beatsPerMinute === 'number' && Number.isFinite(tr.beatsPerMinute)) {
         rhrSamples.push(tr.beatsPerMinute);
       }
@@ -608,7 +658,7 @@ async function readHealthConnectImportMaps(
         if (!Array.isArray(samples)) continue;
         for (const s of samples) {
           if (typeof s?.time !== 'string') continue;
-          if (!instantInRange(s.time, bounds)) continue;
+          if (!inBioWindow(s.time)) continue;
           if (typeof s.beatsPerMinute === 'number' && Number.isFinite(s.beatsPerMinute)) {
             genericBpm.push(s.beatsPerMinute);
           }
@@ -620,7 +670,7 @@ async function readHealthConnectImportMaps(
     const hrvSamples: number[] = [];
     for (const r of hrvRows) {
       const tr = r as RecordResult<'HeartRateVariabilityRmssd'>;
-      if (!instantInRange(tr.time, bounds)) continue;
+      if (!inBioWindow(tr.time)) continue;
       if (
         typeof tr.heartRateVariabilityMillis === 'number' &&
         Number.isFinite(tr.heartRateVariabilityMillis)
@@ -633,7 +683,7 @@ async function readHealthConnectImportMaps(
     const rrSamples: number[] = [];
     for (const r of rrRows) {
       const tr = r as RecordResult<'RespiratoryRate'>;
-      if (!instantInRange(tr.time, bounds)) continue;
+      if (!inBioWindow(tr.time)) continue;
       if (typeof tr.rate === 'number' && Number.isFinite(tr.rate)) rrSamples.push(tr.rate);
     }
     const respiratoryRate = rrSamples.length > 0 ? averageFinite(rrSamples) : null;
@@ -801,8 +851,11 @@ export type HealthConnectManualSyncResult =
  * Reads Health Connect data for the window and merges into `manual_logs` (cycle + BBT) and
  * `biometrics` (nocturnal vitals). **Biometrics** use two-step sleep anchoring: for each local wake
  * calendar day, a primary **SleepSession** overlapping [00:00, 10:00) is chosen (longest, then end
- * closest to 09:00 local). Vitals are taken only inside that session’s `[startTime, endTime]`; if no
- * session matches, the window defaults to local **00:00–10:00** on that day. **Clinical math:**
+ * closest to 09:00 local). Vitals are taken inside that session’s `[startTime, endTime]` (when
+ * `stages` exist, samples must also fall in a non-awake stage segment inside the session); if no
+ * session matches, the window defaults to local **00:00–10:00** on that day. **Health Connect does
+ * not embed HRV / RR / temp inside `SleepSession`** — those still require their own record types when
+ * the OEM writes them; sleep stages only refine the time filter. **Clinical math:**
  * BodyTemperature + BasalBodyTemperature °C and RHR → **minimum** in-window (RHR from
  * **RestingHeartRate** when present, else minimum **HeartRate** sample BPM in the same window); HRV RMSSD and
  * respiratory rate → **average** in-window. Manual BBT on the calendar still uses the latest

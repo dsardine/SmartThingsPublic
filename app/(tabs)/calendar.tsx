@@ -13,6 +13,7 @@ import {
   View,
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import * as Device from 'expo-device';
 import { Picker } from '@react-native-picker/picker';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -423,6 +424,8 @@ export default function CalendarScreen() {
   const [saving, setSaving] = useState(false);
   /** Android: never mount DateTimePicker until user asks — inline mount opens a dialog and re-opens on every re-render. */
   const [androidTimePickerVisible, setAndroidTimePickerVisible] = useState(false);
+  const [isSamsung, setIsSamsung] = useState(false);
+  const [showSamsungHelper, setShowSamsungHelper] = useState(false);
   const [monthLogMarkers, setMonthLogMarkers] = useState<LogMarker[]>([]);
   /** Profiles `last_period_date` (onboarding LMP); used to pre-fill the log sheet on that day. */
   const [intakeLmpIso, setIntakeLmpIso] = useState<string | null>(null);
@@ -431,8 +434,18 @@ export default function CalendarScreen() {
   const cycleLengthAvg = useAppStore((s) => s.cycleLengthAvg);
 
   useEffect(() => {
-    if (!sheetOpen) setAndroidTimePickerVisible(false);
+    if (!sheetOpen) {
+      setAndroidTimePickerVisible(false);
+      setShowSamsungHelper(false);
+    }
   }, [sheetOpen]);
+
+  useEffect(() => {
+    const m = Device.manufacturer?.trim().toLowerCase();
+    if (m === 'samsung') {
+      setIsSamsung(true);
+    }
+  }, []);
 
   const { bleedingByIso, inferredFill } = useMemo(
     () => computeBleedingVisualSets(monthLogMarkers, intakeLmpIso),
@@ -1176,6 +1189,17 @@ export default function CalendarScreen() {
                   trackColor={{ true: colors.primarySageGreen, false: colors.chartGrid }}
                 />
               </View>
+              {isSamsung ? (
+                <Pressable
+                  onPress={() => setShowSamsungHelper(true)}
+                  style={({ pressed }) => [styles.samsungHelperBtn, pressed && styles.samsungHelperBtnPressed]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open Samsung Health tips for HRV and skin temperature">
+                  <Text style={styles.samsungHelperBtnTxt}>
+                    Missing HRV or Temp? Tap here to find it in Samsung Health.
+                  </Text>
+                </Pressable>
+              ) : null}
               <Field label="Disturbances">
                 <View style={styles.chips}>
                   {DIST_OPTS.map((d) => (
@@ -1256,6 +1280,46 @@ export default function CalendarScreen() {
                 <Text style={styles.saveTxt}>{saving ? 'Saving…' : 'Save'}</Text>
               </Pressable>
             </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={showSamsungHelper}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setShowSamsungHelper(false)}>
+        <View style={styles.samsungModalRoot}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowSamsungHelper(false)} />
+          <View style={styles.samsungModalCard}>
+            <Text style={styles.samsungModalTitle}>How to find your Samsung Data</Text>
+            <ScrollView style={styles.samsungModalScroll} showsVerticalScrollIndicator={false}>
+              <Text style={styles.samsungStep}>
+                <Text style={styles.samsungStepNum}>1. </Text>
+                {'Open the Samsung Health app on your phone.'}
+              </Text>
+              <Text style={styles.samsungStep}>
+                <Text style={styles.samsungStepNum}>2. </Text>
+                {"Tap on the 'Sleep' tile."}
+              </Text>
+              <Text style={styles.samsungStep}>
+                <Text style={styles.samsungStepNum}>3. </Text>
+                {"Scroll down to the bottom and look for 'Heart Rate' and 'Skin Temperature'."}
+              </Text>
+              <Text style={styles.samsungStep}>
+                <Text style={styles.samsungStepNum}>4. </Text>
+                {
+                  'Note your lowest resting heart rate and temperature during the night, and enter those numbers here.'
+                }
+              </Text>
+            </ScrollView>
+            <Pressable
+              style={styles.samsungModalClose}
+              onPress={() => setShowSamsungHelper(false)}
+              accessibilityRole="button"
+              accessibilityLabel="Close Samsung Health tips">
+              <Text style={styles.samsungModalCloseTxt}>Got it</Text>
+            </Pressable>
           </View>
         </View>
       </Modal>
@@ -1587,4 +1651,68 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   saveTxt: { color: colors.card, fontWeight: '800', fontSize: 16 },
+  samsungHelperBtn: {
+    marginBottom: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: colors.primarySageGreen,
+    backgroundColor: 'rgba(156, 174, 150, 0.18)',
+  },
+  samsungHelperBtnPressed: {
+    opacity: 0.88,
+  },
+  samsungHelperBtnTxt: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.textDark,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  samsungModalRoot: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  samsungModalCard: {
+    backgroundColor: colors.card,
+    borderRadius: 16,
+    padding: 20,
+    maxHeight: '80%',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.chartGrid,
+  },
+  samsungModalTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: colors.textDark,
+    marginBottom: 14,
+  },
+  samsungModalScroll: {
+    maxHeight: 320,
+    marginBottom: 16,
+  },
+  samsungStep: {
+    fontSize: 15,
+    color: colors.textDark,
+    lineHeight: 22,
+    marginBottom: 12,
+  },
+  samsungStepNum: {
+    fontWeight: '800',
+    color: colors.primarySageGreen,
+  },
+  samsungModalClose: {
+    backgroundColor: colors.primarySageGreen,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  samsungModalCloseTxt: {
+    color: colors.card,
+    fontWeight: '800',
+    fontSize: 16,
+  },
 });
