@@ -27,8 +27,7 @@ import {
   writeClinicalCsvFile,
 } from '@/src/lib/exportService';
 import {
-  getHealthConnectMenuSummary,
-  healthConnectHasAllReadPermissions,
+  healthConnectGetPermissionUiState,
   healthConnectOpenSettings,
   healthConnectRequestReadPermissions,
   healthConnectSyncMenstruationAndBbtToManualLogs,
@@ -77,8 +76,10 @@ export default function MenuScreen() {
   const [signOutBusy, setSignOutBusy] = useState(false);
   const [wearableSummary, setWearableSummary] = useState<string | null>(null);
   const [wearableBusy, setWearableBusy] = useState(false);
-  /** When true, all Sardine read permissions are granted — hide "Allow access". */
+  /** When true, all Sardine Health Connect read types are granted — hide "Allow access". */
   const [wearablePermissionsComplete, setWearablePermissionsComplete] = useState<boolean | null>(null);
+  /** When true, at least one HC read type is granted — show "Import from Health Connect". */
+  const [wearableHcAnyRead, setWearableHcAnyRead] = useState<boolean | null>(null);
   const [hcImportModalOpen, setHcImportModalOpen] = useState(false);
   /** `null` = import all history Health Connect allows (passes `null` as lookback). */
   const [hcLookbackChoice, setHcLookbackChoice] = useState<60 | 180 | null>(60);
@@ -94,13 +95,11 @@ export default function MenuScreen() {
     async (cancelled?: () => boolean) => {
       const dead = () => cancelled?.() === true;
       if (Platform.OS === 'android') {
-        const [summary, granted] = await Promise.all([
-          getHealthConnectMenuSummary(),
-          healthConnectHasAllReadPermissions(),
-        ]);
+        const ui = await healthConnectGetPermissionUiState();
         if (dead()) return;
-        setWearableSummary(summary);
-        setWearablePermissionsComplete(granted);
+        setWearableSummary(ui.summary);
+        setWearablePermissionsComplete(ui.allGranted);
+        setWearableHcAnyRead(ui.anyGranted);
         return;
       }
       if (Platform.OS === 'ios') {
@@ -111,11 +110,13 @@ export default function MenuScreen() {
         if (dead()) return;
         setWearableSummary(summary);
         setWearablePermissionsComplete(granted);
+        setWearableHcAnyRead(null);
         return;
       }
       if (dead()) return;
       setWearableSummary(null);
       setWearablePermissionsComplete(null);
+      setWearableHcAnyRead(null);
     },
     [],
   );
@@ -355,7 +356,8 @@ export default function MenuScreen() {
       Alert.alert(
         'Import complete',
         result.daysTouched === 0
-          ? 'No new Health Connect data was found in that range (or every field was already filled in Sardine).'
+          ? result.zeroDataNote ??
+            'No new Health Connect data was found in that range (or every field was already filled in Sardine).'
           : `Updated ${result.daysTouched} calendar day(s) across your manual log and/or nightly biometrics. Your cycle estimate was refreshed when new bleeding data was merged.`,
       );
     } finally {
@@ -577,7 +579,7 @@ export default function MenuScreen() {
                   {Platform.OS === 'android' ? 'Health Connect settings' : 'Open Health app'}
                 </Text>
               </Pressable>
-              {Platform.OS === 'android' && wearablePermissionsComplete ? (
+              {Platform.OS === 'android' && wearableHcAnyRead ? (
                 <Pressable
                   style={styles.secondaryOutlineBtn}
                   onPress={() => {

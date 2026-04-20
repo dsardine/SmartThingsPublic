@@ -40,3 +40,7 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Machine-local Android SDK path (Gradle). Never commit — paths differ per machine.
+# Covered by `/android` above; listed explicitly so it stays ignored if `android/` is ever tracked.
+android/local.properties

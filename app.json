@@ -30,6 +30,7 @@
         "android.permission.health.READ_BASAL_BODY_TEMPERATURE",
         "android.permission.health.READ_BODY_TEMPERATURE",
         "android.permission.health.READ_HEALTH_DATA_HISTORY",
+        "android.permission.health.READ_HEART_RATE",
         "android.permission.health.READ_HEART_RATE_VARIABILITY",
         "android.permission.health.READ_MENSTRUATION",
         "android.permission.health.READ_RESTING_HEART_RATE",
@@ -85,6 +86,7 @@
           "permissions": [
             "READ_BASAL_BODY_TEMPERATURE",
             "READ_BODY_TEMPERATURE",
+            "READ_HEART_RATE",
             "READ_HEART_RATE_VARIABILITY_RMSSD",
             "READ_RESTING_HEART_RATE",
             "READ_RESPIRATORY_RATE",

@@ -20,6 +20,8 @@ export const SARDINE_HEALTH_CONNECT_READ: Permission[] = [
   /** Wrist / overnight skin temp when the OEM writes it (preferred for `biometrics.sleeping_temp`). */
   { accessType: 'read', recordType: 'BodyTemperature' },
   { accessType: 'read', recordType: 'HeartRateVariabilityRmssd' },
+  /** Samsung Health / OEMs often log only generic intervals; we derive nocturnal RHR as min BPM when RestingHeartRate is empty. */
+  { accessType: 'read', recordType: 'HeartRate' },
   { accessType: 'read', recordType: 'RestingHeartRate' },
   { accessType: 'read', recordType: 'RespiratoryRate' },
   { accessType: 'read', recordType: 'SleepSession' },
@@ -40,6 +42,13 @@ const SARDINE_HC_PERMISSION_REQUEST: (
 
 export const HEALTH_CONNECT_SOFT_NUDGE_DISMISSED_KEY = 'health_connect_soft_nudge_dismissed';
 
+/** Dev-only: filter Metro / Logcat with `[HC:` */
+function hcDebug(tag: string, data: unknown): void {
+  if (__DEV__) {
+    console.log(`[HC:${tag}]`, data);
+  }
+}
+
 type GrantedPermissionLike = {
   accessType?: string;
   recordType?: string;
@@ -47,6 +56,17 @@ type GrantedPermissionLike = {
 
 function permissionSatisfied(granted: GrantedPermissionLike[], want: Permission): boolean {
   return granted.some((g) => g.accessType === want.accessType && g.recordType === want.recordType);
+}
+
+/** One OS grant covers both flow and period; Health Connect may only surface one in JS. */
+function readTypeGrantedForImport(granted: GrantedPermissionLike[], want: Permission): boolean {
+  if (want.recordType === 'MenstruationFlow' || want.recordType === 'MenstruationPeriod') {
+    return (
+      permissionSatisfied(granted, { accessType: 'read', recordType: 'MenstruationFlow' }) ||
+      permissionSatisfied(granted, { accessType: 'read', recordType: 'MenstruationPeriod' })
+    );
+  }
+  return permissionSatisfied(granted, want);
 }
 
 async function loadHealthConnectModule(): Promise<typeof import('react-native-health-connect') | null> {
@@ -71,6 +91,7 @@ export async function healthConnectEnsureInitialized(): Promise<{ ok: true } | {
   }
   const hc = await loadHealthConnectModule();
   if (!hc) {
+    hcDebug('init', { ok: false, reason: 'native_module_unavailable' });
     return {
       ok: false,
       reason:
@@ -80,6 +101,7 @@ export async function healthConnectEnsureInitialized(): Promise<{ ok: true } | {
   try {
     const status = await hc.getSdkStatus();
     if (status !== hc.SdkAvailabilityStatus.SDK_AVAILABLE) {
+      hcDebug('init', { ok: false, sdkStatus: status, expected: hc.SdkAvailabilityStatus.SDK_AVAILABLE });
       return {
         ok: false,
         reason:
@@ -88,10 +110,13 @@ export async function healthConnectEnsureInitialized(): Promise<{ ok: true } | {
     }
     const initialized = await hc.initialize();
     if (!initialized) {
+      hcDebug('init', { ok: false, initialized: false });
       return { ok: false, reason: 'Could not initialize Health Connect.' };
     }
+    hcDebug('init', { ok: true, sdkStatus: status });
     return { ok: true };
   } catch (e) {
+    hcDebug('init', { ok: false, error: e instanceof Error ? e.message : String(e) });
     return {
       ok: false,
       reason: e instanceof Error ? e.message : 'Health Connect initialization failed.',
@@ -100,25 +125,74 @@ export async function healthConnectEnsureInitialized(): Promise<{ ok: true } | {
 }
 
 /**
- * True when every record-type read in `SARDINE_HEALTH_CONNECT_READ` is granted.
- *
- * Note: `react-native-health-connect`’s Android `mapPermissionResult` does **not** surface
- * `PERMISSION_READ_HEALTH_DATA_HISTORY` back to JS as `{ recordType: 'ReadHealthDataHistory' }`, so we
- * cannot verify historical read here without forking the library. We still **request** that
- * permission together with the others; extended history may work when the OS has granted it.
+ * Raw granted flags for Sardine’s Health Connect read types.
+ * `ReadHealthDataHistory` is still **requested** with the batch but often **does not** appear in JS
+ * `getGrantedPermissions()` — older-than-default-window reads depend on the OS granting it in the sheet.
  */
-export async function healthConnectHasAllReadPermissions(): Promise<boolean> {
+export async function healthConnectGetReadPermissionFlags(): Promise<{
+  granted: GrantedPermissionLike[];
+  all: boolean;
+  any: boolean;
+} | null> {
   const init = await healthConnectEnsureInitialized();
-  if (!init.ok) return false;
+  if (!init.ok) return null;
   const hc = await loadHealthConnectModule();
-  if (!hc) return false;
+  if (!hc) return null;
   try {
     const raw = (await hc.getGrantedPermissions()) as unknown[];
     const granted = parseGranted(raw);
-    return SARDINE_HEALTH_CONNECT_READ.every((p) => permissionSatisfied(granted, p));
+    const all = SARDINE_HEALTH_CONNECT_READ.every((p) => readTypeGrantedForImport(granted, p));
+    const any = SARDINE_HEALTH_CONNECT_READ.some((p) => readTypeGrantedForImport(granted, p));
+    return { granted, all, any };
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** Every Sardine record type is granted (strict — used for “full access” / nudges). */
+export async function healthConnectHasAllReadPermissions(): Promise<boolean> {
+  const f = await healthConnectGetReadPermissionFlags();
+  return f != null && f.all;
+}
+
+/** At least one Sardine record type is granted — enough to run Import (partial merge). */
+export async function healthConnectHasAnyReadPermission(): Promise<boolean> {
+  const f = await healthConnectGetReadPermissionFlags();
+  return f != null && f.any;
+}
+
+function formatHealthConnectCardSummary(all: boolean, any: boolean): string {
+  if (!any) {
+    return 'Not connected — tap Allow access to choose Health Connect data Sardine may read (cycle, sleep, vitals, BBT). When Android offers it, also allow past activity so reads can go beyond the default recent window.';
+  }
+  if (!all) {
+    return 'Partial access — you can import using the types already allowed. Tap Allow access or Health Connect settings to enable the rest for full vitals + cycle coverage. Data older than ~30 days usually needs “Past activity” in the Health Connect permission sheet (Android 15+ when supported).';
+  }
+  return 'Full access — Sardine can read sleep, vitals (RHR from resting or generic heart rate in sleep, HRV-RMSSD, RR, body temp), BBT, and cycle data. Very old history still depends on Health Connect granting past activity when the OS supports it.';
+}
+
+/** Single round-trip for Menu / diagnostics (summary + permission flags). */
+export async function healthConnectGetPermissionUiState(): Promise<{
+  summary: string;
+  allGranted: boolean;
+  anyGranted: boolean;
+}> {
+  const init = await healthConnectEnsureInitialized();
+  if (!init.ok) {
+    hcDebug('permissionUiState', { summary: 'init_failed', reason: init.reason });
+    return { summary: init.reason, allGranted: false, anyGranted: false };
+  }
+  const f = await healthConnectGetReadPermissionFlags();
+  if (!f) {
+    hcDebug('permissionUiState', { summary: 'flags_null' });
+    return { summary: 'Could not read Health Connect permission state.', allGranted: false, anyGranted: false };
+  }
+  hcDebug('permissionUiState', { allGranted: f.all, anyGranted: f.any });
+  return {
+    summary: formatHealthConnectCardSummary(f.all, f.any),
+    allGranted: f.all,
+    anyGranted: f.any,
+  };
 }
 
 export async function healthConnectRequestReadPermissions(): Promise<{ ok: true } | { ok: false; reason: string }> {
@@ -127,9 +201,16 @@ export async function healthConnectRequestReadPermissions(): Promise<{ ok: true 
   const hc = await loadHealthConnectModule();
   if (!hc) return { ok: false, reason: 'Health Connect module failed to load.' };
   try {
+    hcDebug('requestPermission', {
+      requestedTypes: SARDINE_HC_PERMISSION_REQUEST.map((p) =>
+        'recordType' in p ? `${p.accessType}:${p.recordType}` : String(p),
+      ),
+    });
     await hc.requestPermission(SARDINE_HC_PERMISSION_REQUEST);
+    hcDebug('requestPermission', { result: 'resolved' });
     return { ok: true };
   } catch (e) {
+    hcDebug('requestPermission', { error: e instanceof Error ? e.message : String(e) });
     return {
       ok: false,
       reason: e instanceof Error ? e.message : 'Permission request failed.',
@@ -239,30 +320,33 @@ async function readPagedRecords<T extends RecordType>(
   return acc;
 }
 
+function formatHcNativeReadError(recordType: string, e: unknown): string {
+  const raw = e as { message?: unknown } | null | undefined;
+  const fromMessage =
+    raw != null && typeof raw === 'object' && raw.message != null && String(raw.message).trim() !== ''
+      ? String(raw.message)
+      : '';
+  let fromJson = '';
+  try {
+    fromJson = JSON.stringify(e) ?? '';
+  } catch {
+    fromJson = '';
+  }
+  return fromMessage || fromJson || 'Unknown Native Error';
+}
+
 async function readPagedRecordsSafe<T extends RecordType>(
   hc: typeof import('react-native-health-connect'),
   recordType: T,
   timeRangeFilter: TimeRangeFilter,
+  readErrors: string[],
 ): Promise<RecordResult<T>[]> {
   try {
     return await readPagedRecords(hc, recordType, timeRangeFilter);
   } catch (e: unknown) {
-    // Null-safe: native throws may omit `message`; JSON.stringify can throw on exotic values.
-    const raw = e as { message?: unknown } | null | undefined;
-    const fromMessage =
-      raw != null && typeof raw === 'object' && raw.message != null && String(raw.message).trim() !== ''
-        ? String(raw.message)
-        : '';
-    let fromJson = '';
-    try {
-      fromJson = JSON.stringify(e) ?? '';
-    } catch {
-      fromJson = '';
-    }
-    const errorMsg = fromMessage || fromJson || 'Unknown Native Error';
-
-    Alert.alert(`Health Connect Error: ${recordType}`, errorMsg);
-
+    const errorMsg = formatHcNativeReadError(String(recordType), e);
+    readErrors.push(`${recordType}: ${errorMsg}`);
+    hcDebug('readRecordsFail', { recordType, errorMsg });
     if (__DEV__) {
       console.warn(`[HealthConnect] readRecords(${recordType}) failed:`, e);
     }
@@ -382,17 +466,46 @@ async function readHealthConnectImportMaps(
   const profileU: 'F' | 'C' = profileTempUnit === 'C' ? 'C' : 'F';
   const readFilter = buildHcImportReadTimeRangeFilter(lookbackDays);
   const cutoffMs = importCutoffMs(lookbackDays);
+  const readErrors: string[] = [];
 
-  const [flows, periodRanges, bbts, bodyTemps, rhrRows, hrvRows, rrRows, sleepRows] = await Promise.all([
-    readPagedRecordsSafe(hc, 'MenstruationFlow', readFilter),
-    readPagedRecordsSafe(hc, 'MenstruationPeriod', readFilter),
-    readPagedRecordsSafe(hc, 'BasalBodyTemperature', readFilter),
-    readPagedRecordsSafe(hc, 'BodyTemperature', readFilter),
-    readPagedRecordsSafe(hc, 'RestingHeartRate', readFilter),
-    readPagedRecordsSafe(hc, 'HeartRateVariabilityRmssd', readFilter),
-    readPagedRecordsSafe(hc, 'RespiratoryRate', readFilter),
-    readPagedRecordsSafe(hc, 'SleepSession', readFilter),
-  ]);
+  const [flows, periodRanges, bbts, bodyTemps, rhrRows, heartRateRows, hrvRows, rrRows, sleepRows] =
+    await Promise.all([
+      readPagedRecordsSafe(hc, 'MenstruationFlow', readFilter, readErrors),
+      readPagedRecordsSafe(hc, 'MenstruationPeriod', readFilter, readErrors),
+      readPagedRecordsSafe(hc, 'BasalBodyTemperature', readFilter, readErrors),
+      readPagedRecordsSafe(hc, 'BodyTemperature', readFilter, readErrors),
+      readPagedRecordsSafe(hc, 'RestingHeartRate', readFilter, readErrors),
+      readPagedRecordsSafe(hc, 'HeartRate', readFilter, readErrors),
+      readPagedRecordsSafe(hc, 'HeartRateVariabilityRmssd', readFilter, readErrors),
+      readPagedRecordsSafe(hc, 'RespiratoryRate', readFilter, readErrors),
+      readPagedRecordsSafe(hc, 'SleepSession', readFilter, readErrors),
+    ]);
+
+  if (readErrors.length > 0) {
+    const body =
+      readErrors.slice(0, 5).join('\n') + (readErrors.length > 5 ? `\n…${readErrors.length - 5} more` : '');
+    Alert.alert('Health Connect read', body);
+  }
+
+  hcDebug('importReadRawCounts', {
+    lookbackDays,
+    effectiveLookbackDays: effectiveLookbackDays(lookbackDays),
+    readFilter,
+    cutoffMs: new Date(cutoffMs).toISOString(),
+    counts: {
+      MenstruationFlow: flows.length,
+      MenstruationPeriod: periodRanges.length,
+      BasalBodyTemperature: bbts.length,
+      BodyTemperature: bodyTemps.length,
+      RestingHeartRate: rhrRows.length,
+      HeartRate: heartRateRows.length,
+      HeartRateVariabilityRmssd: hrvRows.length,
+      RespiratoryRate: rrRows.length,
+      SleepSession: sleepRows.length,
+    },
+    readErrorsCount: readErrors.length,
+    readErrors,
+  });
 
   const manualByDate = new Map<string, HcDayPatch>();
   const touchManual = (iso: string): HcDayPatch => {
@@ -460,6 +573,7 @@ async function readHealthConnectImportMaps(
     const primarySleep = pickPrimaryNocturnalSleep(sleepIntervals, wakeIso);
     const bounds = bioBoundsForWakeDay(wakeIso, primarySleep);
 
+    /** Wrist/skin (BodyTemperature) and BBT rows both contribute; minimum °C in the sleep window → `sleeping_temp`. */
     const tempsC: number[] = [];
     for (const r of bodyTemps) {
       const tr = r as RecordResult<'BodyTemperature'>;
@@ -485,7 +599,23 @@ async function readHealthConnectImportMaps(
         rhrSamples.push(tr.beatsPerMinute);
       }
     }
-    const rhr = minFinite(rhrSamples);
+    let rhr = minFinite(rhrSamples);
+    if (rhr == null) {
+      const genericBpm: number[] = [];
+      for (const r of heartRateRows) {
+        const tr = r as RecordResult<'HeartRate'>;
+        const samples = tr.samples;
+        if (!Array.isArray(samples)) continue;
+        for (const s of samples) {
+          if (typeof s?.time !== 'string') continue;
+          if (!instantInRange(s.time, bounds)) continue;
+          if (typeof s.beatsPerMinute === 'number' && Number.isFinite(s.beatsPerMinute)) {
+            genericBpm.push(s.beatsPerMinute);
+          }
+        }
+      }
+      rhr = minFinite(genericBpm);
+    }
 
     const hrvSamples: number[] = [];
     for (const r of hrvRows) {
@@ -519,6 +649,13 @@ async function readHealthConnectImportMaps(
       ...(respiratoryRate != null ? { respiratoryRate } : {}),
     });
   }
+
+  hcDebug('importMapsBuilt', {
+    manualDays: manualByDate.size,
+    bioDays: bioByDate.size,
+    manualSampleKeys: [...manualByDate.keys()].slice(0, 8),
+    bioSampleKeys: [...bioByDate.keys()].slice(0, 8),
+  });
 
   return { manualByDate, bioByDate };
 }
@@ -647,7 +784,7 @@ async function mergeHcBiometricsToSupabase(
 }
 
 export type HealthConnectManualSyncResult =
-  | { ok: true; daysTouched: number }
+  | { ok: true; daysTouched: number; zeroDataNote?: string }
   | { ok: false; reason: string };
 
 /**
@@ -656,7 +793,8 @@ export type HealthConnectManualSyncResult =
  * calendar day, a primary **SleepSession** overlapping [00:00, 10:00) is chosen (longest, then end
  * closest to 09:00 local). Vitals are taken only inside that session’s `[startTime, endTime]`; if no
  * session matches, the window defaults to local **00:00–10:00** on that day. **Clinical math:**
- * BodyTemperature + BasalBodyTemperature °C and RHR → **minimum** in-window; HRV RMSSD and
+ * BodyTemperature + BasalBodyTemperature °C and RHR → **minimum** in-window (RHR from
+ * **RestingHeartRate** when present, else minimum **HeartRate** sample BPM in the same window); HRV RMSSD and
  * respiratory rate → **average** in-window. Manual BBT on the calendar still uses the latest
  * same-day basal sample (full import range), not the sleep-bounded pool.
  * Ghost Mode: only `manual_logs` (MMKV); biometrics stay cloud-only and are skipped.
@@ -683,11 +821,22 @@ export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
   const init = await healthConnectEnsureInitialized();
   if (!init.ok) return { ok: false, reason: init.reason };
 
-  const hasPerms = await healthConnectHasAllReadPermissions();
-  if (!hasPerms) {
+  const perm = await healthConnectGetReadPermissionFlags();
+  hcDebug('syncStart', {
+    lookbackDays,
+    effectiveLookbackDays: effectiveLookbackDays(lookbackDays),
+    temperatureUnit,
+    isGhostMode,
+    hasUserId: Boolean(userId),
+    permAll: perm?.all,
+    permAny: perm?.any,
+  });
+  if (!perm || !perm.any) {
+    hcDebug('syncAbort', { reason: 'no_sardine_read_permissions' });
     return {
       ok: false,
-      reason: 'Allow Sardine to read the Health Connect data types listed in the permission screen (use “Allow access” on the previous card).',
+      reason:
+        'Allow Sardine to read at least one Health Connect type (tap “Allow access” on the previous card). You can enable more types later in Health Connect settings.',
     };
   }
 
@@ -701,6 +850,7 @@ export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
     manualByDate = maps.manualByDate;
     bioByDate = maps.bioByDate;
   } catch (e) {
+    hcDebug('syncReadMapsThrow', { error: e instanceof Error ? e.message : String(e) });
     return {
       ok: false,
       reason: e instanceof Error ? e.message : 'Could not read Health Connect records.',
@@ -709,7 +859,13 @@ export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
 
   if (manualByDate.size === 0 && bioByDate.size === 0) {
     await persistDynamicCycleLengthAfterBleedingLog({ isGhost: isGhostMode, userId });
-    return { ok: true, daysTouched: 0 };
+    hcDebug('syncZeroMaps', { manualByDate: 0, bioByDate: 0 });
+    return {
+      ok: true,
+      daysTouched: 0,
+      zeroDataNote:
+        'No rows matched this lookback in Health Connect, or Sardine already had those cells filled. Tips: (1) Open Health Connect and confirm apps are writing the data types Sardine reads (cycle as flow or period, BBT, sleep, heart rate / HRV-RMSSD, etc.). (2) Data older than ~30 days often needs “Past activity” allowed in the Health Connect permission sheet when Android offers it. (3) Sardine prefers RestingHeartRate for RHR; if your app only writes generic Heart rate, allow that type too — we take the lowest BPM in the nocturnal window as a stand-in.',
+    };
   }
 
   if (isGhostMode) {
@@ -717,6 +873,7 @@ export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
       mergeGhostDayFromHc(patch.iso, patch);
     }
     await persistDynamicCycleLengthAfterBleedingLog({ isGhost: true, userId: null });
+    hcDebug('syncGhostDone', { daysTouched: manualByDate.size });
     return { ok: true, daysTouched: manualByDate.size };
   }
 
@@ -809,16 +966,13 @@ export async function healthConnectSyncMenstruationAndBbtToManualLogs(args: {
 
   await persistDynamicCycleLengthAfterBleedingLog({ isGhost: false, userId });
   const touched = new Set<string>([...manualByDate.keys(), ...bioByDate.keys()]);
+  hcDebug('syncCloudDone', { daysTouched: touched.size, manualKeys: manualByDate.size, bioKeys: bioByDate.size });
   return { ok: true, daysTouched: touched.size };
 }
 
 /** Short status line for the menu card. */
 export async function getHealthConnectMenuSummary(): Promise<string> {
   if (Platform.OS !== 'android') return '';
-  const init = await healthConnectEnsureInitialized();
-  if (!init.ok) return init.reason;
-  const all = await healthConnectHasAllReadPermissions();
-  return all
-    ? 'Sardine can read sleep sessions, vitals (RHR, HRV, respiratory rate, body temp), BBT, and period flow. Biometrics import anchors vitals to detected sleep (or 00:00–10:00 fallback). Past-data access is requested when you tap Allow access.'
-    : 'Not connected — tap below to allow read access for those Health Connect types (plus past data when the system offers it).';
+  const ui = await healthConnectGetPermissionUiState();
+  return ui.summary;
 }
